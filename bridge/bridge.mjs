@@ -351,10 +351,13 @@ async function main(operation) {
     return;
   }
 
-  if (input.check_login && !await withTimeout(AUTH_CHECK_TIMEOUT, () => authenticate(sdk, false))) {
-    // The reader closes the bridge and its SDK child when it receives this event.
-    emit({ type: 'login_required' });
-    return;
+  if (input.check_login) {
+    if (!await withTimeout(AUTH_CHECK_TIMEOUT, () => authenticate(sdk, false))) {
+      // The reader closes the bridge and its SDK child when it receives this event.
+      emit({ type: 'login_required' });
+      return;
+    }
+    if (input.report_session === true) emit({ type: 'session_verified' });
   }
   const work = await mkdtemp(join(tmpdir(), 'literature-reader-'));
   let result;

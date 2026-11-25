@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auth_popup;
 mod citations;
 mod digest;
 mod hyphenation;

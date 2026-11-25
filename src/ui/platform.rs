@@ -95,24 +95,38 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             }
             WM_ERASEBKGND => return 1,
             WM_TIMER => {
-                let (changed, login_url, update_message) = {
+                let (changed, entered_gate, login_url, update_message) = {
                     let view = &mut *ptr;
                     let (update_changed, update_message) = view.updates.poll();
-                    let changed = view.reader.poll() | view.scroll_text_selection() | update_changed;
-                    view.save_reading_position_if_due();
-                    (changed, view.reader.take_login_url(), update_message)
-                };
-                let opening_login = login_url.is_some();
-                if let Some(url) = login_url {
-                    let target = wide(&url);
-                    let verb = wide("open");
-                    if ShellExecuteW(hwnd, verb.as_ptr(), target.as_ptr(), null(), null(), SW_SHOWNORMAL) as isize <= 32
-                        && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
-                    {
-                        let reader = &mut (*ptr).reader;
-                        reader.cancel_login();
-                        reader.models_error = Some("无法打开浏览器，请检查 Windows 的默认浏览器设置。".into());
+                    let was_signed_in = view.reader.signed_in;
+                    let mut changed = view.reader.poll() | update_changed;
+                    let entered_gate = was_signed_in && !view.reader.signed_in;
+                    if entered_gate {
+                        changed |= view.clear_text_selection();
                     }
+                    if view.reader.signed_in {
+                        changed |= view.open_pending_document() | view.scroll_text_selection();
+                    }
+                    let signing_in = view.reader.signing_in();
+                    if !signing_in {
+                        changed |= view.login_link.take().is_some();
+                    }
+                    view.save_reading_position_if_due();
+                    (changed, entered_gate, view.reader.take_login_url().filter(|_| signing_in), update_message)
+                };
+                if entered_gate {
+                    cancel_mouse_press(hwnd, ptr);
+                }
+                let opening_login = login_url.is_some();
+                if let Some(url) = login_url
+                    && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
+                    && let Err(error) = crate::auth_popup::open(&url)
+                    && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
+                    && (*ptr).reader.signing_in()
+                {
+                    let view = &mut *ptr;
+                    view.login_link = Some(url);
+                    view.reader.models_error = Some(error);
                 }
                 if changed || opening_login {
                     redraw(hwnd);
@@ -128,11 +142,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 let mut point: POINT = zeroed();
                 if GetCursorPos(&mut point) != 0 && ScreenToClient(hwnd, &mut point) != 0 {
                     let view = &*ptr;
-                    let cursor = if view.text_dragging() {
+                    let cursor = if view.reader.signed_in && view.text_dragging() {
                         Some(IDC_IBEAM)
                     } else if view.hit(point).is_some() {
                         Some(IDC_HAND)
-                    } else if view.text_at(point) {
+                    } else if view.reader.signed_in && view.text_at(point) {
                         Some(IDC_IBEAM)
                     } else {
                         None
@@ -147,7 +161,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             WM_MOUSEMOVE => {
                 let point = point_from(lparam);
                 let view = &mut *ptr;
-                let dragging = view.text_dragging();
+                let dragging = view.reader.signed_in && view.text_dragging();
                 let hover = if dragging { None } else { view.hit(point) };
                 let changed = (dragging && view.drag_text_selection(point)) || hover != view.hover;
                 view.hover = hover;
@@ -173,7 +187,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 let (selecting, changed) = {
                     let view = &mut *ptr;
                     let action = view.hit(point);
-                    let selecting = action.is_none() && view.begin_text_selection(point);
+                    let selecting = view.reader.signed_in && action.is_none() && view.begin_text_selection(point);
                     let changed = selecting || view.clear_text_selection();
                     view.mouse_press = if selecting { Some(MousePress::Text) } else { action.map(MousePress::Action) };
                     (selecting, changed)
@@ -193,7 +207,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 let press = (*ptr).mouse_press.take();
                 match press {
                     Some(MousePress::Text) => {
-                        (*ptr).finish_text_selection(point);
+                        if (*ptr).reader.signed_in {
+                            (*ptr).finish_text_selection(point);
+                        }
                         if GetCapture() == hwnd {
                             ReleaseCapture();
                         }
@@ -213,12 +229,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 }
                 return DefWindowProcW(hwnd, message, wparam, lparam);
             }
-            WM_RBUTTONUP => {
+            WM_RBUTTONUP if (*ptr).reader.signed_in => {
                 let point = point_from(lparam);
                 if let Some((label, text)) = copy_at(&*ptr, point) {
                     let mut screen = point;
                     ClientToScreen(hwnd, &mut screen);
-                    if menu_at(hwnd, screen, &[(1, label.into(), false)]) == 1 {
+                    if menu_at(hwnd, screen, &[(1, label.into(), false)]) == 1
+                        && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
+                        && (*ptr).reader.signed_in
+                    {
                         copy_text(hwnd, &text);
                     }
                 }
@@ -230,7 +249,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                     redraw(hwnd);
                 }
             }
-            WM_MOUSEWHEEL => {
+            WM_MOUSEWHEEL if (*ptr).reader.signed_in => {
                 let view = &mut *ptr;
                 let delta = (wparam >> 16) as i16 as i32;
                 let mut lines: u32 = 3;
@@ -239,12 +258,23 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 view.scroll(view.scroll - delta * pixels / 120);
                 redraw(hwnd);
             }
-            WM_VSCROLL => {
+            WM_VSCROLL if (*ptr).reader.signed_in => {
                 scroll(hwnd, &mut *ptr, (wparam & 0xffff) as i32);
                 redraw(hwnd);
             }
             WM_KEYDOWN => {
                 let key = wparam as u16;
+                if !(*ptr).reader.signed_in {
+                    if key == VK_RETURN && !(*ptr).reader.signing_in() && !(*ptr).reader.checking_models {
+                        activate(hwnd, ptr, Action::Login);
+                        return 0;
+                    }
+                    if key == VK_ESCAPE && (*ptr).reader.signing_in() {
+                        activate(hwnd, ptr, Action::Login);
+                        return 0;
+                    }
+                    return DefWindowProcW(hwnd, message, wparam, lparam);
+                }
                 let ctrl = GetKeyState(i32::from(VK_CONTROL)) < 0;
                 let pdf_view = (*ptr).pdf_view;
                 match key {
@@ -363,7 +393,21 @@ fn paint_window(hwnd: HWND, view: &mut View) {
 
 fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
     unsafe {
+        if !(*ptr).can_activate(action) {
+            return;
+        }
         match action {
+            Action::Login => {
+                let view = &mut *ptr;
+                if !view.reader.signed_in {
+                    if view.reader.signing_in() {
+                        view.cancel_login();
+                    } else {
+                        view.start_login();
+                    }
+                }
+            }
+            Action::CopyLoginLink => copy_login_link(hwnd, ptr),
             Action::Open => {
                 cancel_mouse_press(hwnd, ptr);
                 if let Some(path) = choose_file(hwnd)
@@ -405,7 +449,10 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                 let (items, ids, signing_in, anchor) = {
                     let view = &*ptr;
                     let signing_in = view.reader.signing_in();
-                    let mut items = vec![(1, if signing_in { "取消登录" } else { "网页登录 CodeBuddy" }.into(), false)];
+                    let mut items = vec![(1, if signing_in { "取消登录" } else { "重新登录 CodeBuddy" }.into(), false)];
+                    if signing_in && view.login_link.is_some() {
+                        items.push((3, "复制登录链接".into(), false));
+                    }
                     let mut ids = Vec::new();
                     if !signing_in && !view.reader.checking_models
                         && (view.reader.signed_in || view.reader.models_error.is_some())
@@ -431,14 +478,14 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                 if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
                     return;
                 }
-                let reader = &mut (*ptr).reader;
                 match selection {
-                    1 if signing_in => reader.cancel_login(),
-                    1 => reader.start_login(),
-                    2 => reader.refresh_models(),
+                    1 if signing_in => (*ptr).cancel_login(),
+                    1 => (*ptr).start_login(),
+                    2 => (*ptr).reader.refresh_models(),
+                    3 if signing_in => copy_login_link(hwnd, ptr),
                     id if id >= 3 => {
                         if let Some(id) = ids.get((id - 3) as usize) {
-                            reader.select_model(id);
+                            (*ptr).reader.select_model(id);
                         }
                     }
                     _ => {}
@@ -457,7 +504,7 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                     (menu_anchor(view, action), items)
                 };
                 let selection = dropdown(hwnd, anchor, &items);
-                if selection > 0 {
+                if selection > 0 && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr && (*ptr).reader.signed_in {
                     (*ptr).goto(selection as usize);
                 }
             }
@@ -483,11 +530,18 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
             }
             Action::Details => {
                 let view = &*ptr;
-                let mut messages = view.reader.document.as_ref().map_or_else(Vec::new, |doc| doc.notices.clone());
-                messages.extend(view.reader.load_error.clone());
-                messages.extend(view.reader.translation_error.clone());
+                let mut messages = Vec::new();
+                if view.reader.signed_in {
+                    if let Some(document) = &view.reader.document {
+                        messages.extend(document.notices.clone());
+                    }
+                    messages.extend(view.reader.load_error.clone());
+                    messages.extend(view.reader.translation_error.clone());
+                }
                 messages.extend(view.reader.models_error.clone());
-                alert(hwnd, &messages.join("\r\n\r\n"));
+                if !messages.is_empty() {
+                    alert(hwnd, &messages.join("\r\n\r\n"));
+                }
             }
             Action::Update => {
                 activate_update(hwnd, ptr);
@@ -507,6 +561,16 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
             }
         }
         redraw(hwnd);
+    }
+}
+
+fn copy_login_link(hwnd: HWND, ptr: *mut View) {
+    let url = unsafe {
+        let view = &*ptr;
+        view.login_link.clone().filter(|_| view.reader.signing_in())
+    };
+    if let Some(url) = url && !copy_text(hwnd, &url) {
+        alert(hwnd, "无法复制登录链接，请重试。");
     }
 }
 
@@ -639,28 +703,30 @@ fn drop_path(handle: HDROP) -> Option<PathBuf> {
     }
 }
 
-fn copy_text(hwnd: HWND, text: &str) {
+fn copy_text(hwnd: HWND, text: &str) -> bool {
     const CF_UNICODETEXT: u32 = 13;
     let text = wide(text);
     unsafe {
         let memory = GlobalAlloc(GMEM_MOVEABLE, text.len() * size_of::<u16>());
-        if memory.is_null() { return; }
+        if memory.is_null() { return false; }
         let destination = GlobalLock(memory).cast::<u16>();
         if destination.is_null() {
             GlobalFree(memory);
-            return;
+            return false;
         }
         std::ptr::copy_nonoverlapping(text.as_ptr(), destination, text.len());
         GlobalUnlock(memory);
         if OpenClipboard(hwnd) == 0 {
             GlobalFree(memory);
-            return;
+            return false;
         }
         EmptyClipboard();
-        if SetClipboardData(CF_UNICODETEXT, memory).is_null() {
+        let copied = !SetClipboardData(CF_UNICODETEXT, memory).is_null();
+        if !copied {
             GlobalFree(memory);
         }
         CloseClipboard();
+        copied
     }
 }
 

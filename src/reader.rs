@@ -114,6 +114,7 @@ enum Event {
     Opened(usize, Result<PreparedDocument, String>),
     Rendered(usize, ImageKey, Result<Raster, String>),
     Models(Result<Option<Vec<Model>>, String>),
+    SessionVerified,
     LoginUrl(String),
     LoginEnded(Result<(), String>),
     CacheLoaded(u64, io::Result<(Cache, TranslationRows)>),
@@ -287,7 +288,10 @@ impl Reader {
         self.models_error = None;
         let send = self.send.clone();
         thread::spawn(move || {
-            let _ = send.send(Event::Models(Translator::discover_models(check_login)));
+            let result = Translator::discover_models(check_login, || {
+                let _ = send.send(Event::SessionVerified);
+            });
+            let _ = send.send(Event::Models(result));
         });
     }
 
@@ -536,6 +540,7 @@ impl Reader {
                         Err(error) => { self.failed_images.insert(key, error); }
                     }
                 }
+                Event::SessionVerified => self.signed_in = true,
                 Event::Models(result) => {
                     self.checking_models = false;
                     match result {

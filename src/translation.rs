@@ -56,6 +56,7 @@ enum BridgeEvent {
     Ready,
     AuthUrl { url: String },
     LoginRequired,
+    SessionVerified,
     OutputDelta { text: String },
     OutputRate { tokens_per_second: f64 },
     Result { models: Option<Vec<Model>>, text: Option<String> },
@@ -137,8 +138,9 @@ impl<'a> Translator<'a> {
         }
     }
 
-    pub fn discover_models(check_login: bool) -> Result<Option<Vec<Model>>, String> {
-        match run_bridge("models", json!({"check_login": check_login}), 55, None, |_| {})? {
+    pub fn discover_models(check_login: bool, on_verified: impl FnMut()) -> Result<Option<Vec<Model>>, String> {
+        let payload = json!({"check_login": check_login, "report_session": true});
+        match run_bridge("models", payload, 55, None, |_| {}, on_verified)? {
             BridgeEvent::Result { models: Some(models), .. } => Ok(Some(models)),
             BridgeEvent::LoginRequired => Ok(None),
             _ => Err("CodeBuddy 没有返回可读取的模型列表。".into()),
@@ -146,7 +148,7 @@ impl<'a> Translator<'a> {
     }
 
     pub fn login(cancel: &AtomicBool, on_url: impl FnMut(String)) -> Result<(), String> {
-        run_bridge("login", json!({}), 320, Some(cancel), on_url).map(|_| ())
+        run_bridge("login", json!({}), 320, Some(cancel), on_url, || {}).map(|_| ())
     }
 
     pub fn translate_batch(
@@ -399,7 +401,7 @@ fn parse_translation_list(output: &str) -> Option<TranslationList> {
     serde_json::from_str(content).ok()
 }
 
-fn official_login_url(raw: &str) -> Option<String> {
+pub(crate) fn official_login_url(raw: &str) -> Option<String> {
     let url = Url::parse(raw).ok()?;
     let official = matches!(url.host_str(), Some(
         "copilot.tencent.com" | "www.codebuddy.cn" | "codebuddy.cn" | "www.workbuddy.cn" | "workbuddy.cn"
@@ -423,21 +425,23 @@ fn run_bridge(
     deadline_seconds: u64,
     cancel: Option<&AtomicBool>,
     mut on_url: impl FnMut(String),
+    mut on_verified: impl FnMut(),
 ) -> Result<BridgeEvent, String> {
     check_cancelled(cancel)?;
     let mut bridge = BridgeProcess::spawn(operation)?;
     bridge.send(&payload)?;
     bridge.input.take();
     let deadline = Instant::now() + Duration::from_secs(deadline_seconds);
-    let mut opened_browser = false;
+    let mut received_login_url = false;
     loop {
         match bridge.receive(deadline, cancel)? {
             event @ BridgeEvent::Result { .. } => return Ok(event),
             BridgeEvent::LoginRequired if operation == "models" => return Ok(BridgeEvent::LoginRequired),
-            BridgeEvent::AuthUrl { url } if operation == "login" && !opened_browser => {
+            BridgeEvent::SessionVerified if operation == "models" => on_verified(),
+            BridgeEvent::AuthUrl { url } if operation == "login" && !received_login_url => {
                 let url = official_login_url(&url).ok_or_else(|| "CodeBuddy 返回了无法确认的登录地址。".to_owned())?;
                 on_url(url);
-                opened_browser = true;
+                received_login_url = true;
             }
             _ => return Err("CodeBuddy 返回了意外的操作响应。".into()),
         }

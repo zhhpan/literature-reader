@@ -59,6 +59,8 @@ const PAPER_INSET: i32 = 33;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
+    Login,
+    CopyLoginLink,
     Open,
     OpenRecent(usize),
     RecentMenu,
@@ -140,6 +142,8 @@ struct LayoutKey {
 struct View {
     reader: Reader,
     updates: UpdateControl,
+    pending_open: Option<PathBuf>,
+    login_link: Option<String>,
     pdf_view: bool,
     dpi: u32,
     fonts: [HFONT; FONT_COUNT],
@@ -169,6 +173,8 @@ impl View {
         Self {
             reader: Reader::new(),
             updates: UpdateControl::new(),
+            pending_open: None,
+            login_link: None,
             pdf_view: false,
             dpi,
             fonts: make_fonts(dpi),
@@ -195,6 +201,11 @@ impl View {
     }
 
     fn open(&mut self, path: PathBuf) {
+        if !self.reader.signed_in {
+            self.pending_open = Some(path);
+            return;
+        }
+        self.pending_open = None;
         self.flush_reading_position();
         self.reading_position = PositionState::default();
         self.selection = Selection::default();
@@ -213,6 +224,26 @@ impl View {
         self.copy_targets.clear();
         self.focused_reference = None;
         self.reader.open(path);
+    }
+
+    fn open_pending_document(&mut self) -> bool {
+        if self.reader.signed_in && let Some(path) = self.pending_open.take() {
+            self.open(path);
+            return true;
+        }
+        false
+    }
+
+    fn start_login(&mut self) {
+        self.login_link = None;
+        self.reader.start_login();
+    }
+
+    fn cancel_login(&mut self) {
+        if self.login_link.take().is_some() {
+            self.reader.models_error = None;
+        }
+        self.reader.cancel_login();
     }
 
     fn goto(&mut self, page: usize) {
@@ -277,7 +308,13 @@ impl View {
     }
 
     fn hit(&self, point: POINT) -> Option<Action> {
-        self.hits.iter().find(|hit| contains(hit.rect, point)).map(|hit| hit.action)
+        self.hits.iter().find(|hit| contains(hit.rect, point) && self.can_activate(hit.action))
+            .map(|hit| hit.action)
+    }
+
+    fn can_activate(&self, action: Action) -> bool {
+        self.reader.signed_in || matches!(action,
+            Action::Login | Action::CopyLoginLink | Action::Update | Action::Details)
     }
 
     fn scroll(&mut self, value: i32) {
@@ -289,6 +326,22 @@ impl View {
     }
 
     fn status(&self) -> (String, u32) {
+        if self.login_link.is_some() && let Some(error) = &self.reader.models_error {
+            return (error.clone(), ERROR);
+        }
+        if !self.reader.signed_in {
+            if self.reader.signing_in() {
+                return ("请在登录窗口完成 CodeBuddy 授权…".into(), ACCENT);
+            }
+            if self.reader.checking_models {
+                return ("正在恢复 CodeBuddy 登录…".into(), MUTED);
+            }
+            if let Some(error) = &self.reader.models_error {
+                return (error.clone(), ERROR);
+            }
+            let status = if self.pending_open.is_some() { "登录后打开已选 PDF" } else { "" };
+            return (status.into(), MUTED);
+        }
         if let Some(error) = &self.reader.load_error {
             return (error.clone(), ERROR);
         }
@@ -304,7 +357,7 @@ impl View {
             return (status, ACCENT);
         }
         if self.reader.signing_in() {
-            return ("请在浏览器完成 CodeBuddy 登录…".into(), ACCENT);
+            return ("请在登录窗口完成 CodeBuddy 授权…".into(), ACCENT);
         }
         if let Some(error) = &self.reader.translation_error {
             return (error.clone(), ERROR);
@@ -314,9 +367,6 @@ impl View {
         }
         if let Some(error) = &self.reader.models_error {
             return (error.clone(), ERROR);
-        }
-        if !self.reader.signed_in {
-            return ("请在模型菜单登录 CodeBuddy".into(), MUTED);
         }
         if self.reader.models.is_empty() {
             return ("当前账号没有可用的翻译模型".into(), MUTED);
@@ -340,11 +390,14 @@ impl View {
     }
 
     fn paint(&mut self, hwnd: HWND, dc: HDC, area: RECT) {
-        let header = self.s(108);
+        let signed_in = self.reader.signed_in;
+        let header = self.s(if signed_in { 108 } else { 60 });
         let footer = area.bottom - self.s(34);
         let body = rc(0, header, area.right, footer.max(header));
         self.viewport_height = body.bottom - body.top;
-        self.load_reading_position();
+        if signed_in {
+            self.load_reading_position();
+        }
         self.selection.begin_frame(body);
         self.hits.clear();
         self.copy_targets.clear();
@@ -353,7 +406,9 @@ impl View {
         self.paint_toolbar(&painter, area.right);
         let clip = unsafe { SaveDC(dc) };
         unsafe { IntersectClipRect(dc, body.left, body.top, body.right, body.bottom) };
-        if self.reader.document.is_some() {
+        if !signed_in {
+            self.paint_login(&painter, body);
+        } else if self.reader.document.is_some() {
             if self.pdf_view {
                 self.paint_original(&painter, body);
             } else {
@@ -368,15 +423,17 @@ impl View {
         if clip != 0 {
             unsafe { RestoreDC(dc, clip) };
         }
-        self.max_scroll = (self.body_height - self.viewport_height).max(0);
-        self.scroll = self.scroll.clamp(0, self.max_scroll);
+        if signed_in {
+            self.max_scroll = (self.body_height - self.viewport_height).max(0);
+            self.scroll = self.scroll.clamp(0, self.max_scroll);
+        }
         let info = SCROLLINFO {
             cbSize: size_of::<SCROLLINFO>() as u32,
             fMask: SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL,
             nMin: 0,
-            nMax: self.body_height.saturating_sub(1).max(0),
+            nMax: if signed_in { self.body_height.saturating_sub(1).max(0) } else { 0 },
             nPage: self.viewport_height.max(0) as u32,
-            nPos: self.scroll,
+            nPos: if signed_in { self.scroll } else { 0 },
             nTrackPos: 0,
         };
         unsafe { SetScrollInfo(hwnd, SB_VERT, &info, 1) };
@@ -385,11 +442,15 @@ impl View {
 
     fn paint_toolbar(&mut self, p: &Painter, width: i32) {
         let x = self.s(22);
-        p.fill(rc(0, 0, width, self.s(108)), WHITE);
+        p.fill(rc(0, 0, width, self.s(if self.reader.signed_in { 108 } else { 60 })), WHITE);
         p.round(rc(x, self.s(14), x + self.s(31), self.s(45)), self.s(8), ACCENT, ACCENT);
         p.fill(rc(x + self.s(7), self.s(23), x + self.s(14), self.s(35)), WHITE);
         p.fill(rc(x + self.s(17), self.s(23), x + self.s(24), self.s(35)), color(164, 222, 205));
         p.line_text("文献阅读器", BRAND, TEXT, rc(x + self.s(42), 0, x + self.s(155), self.s(59)), DT_LEFT);
+        p.fill(rc(0, self.s(59), width, self.s(60)), LINE);
+        if !self.reader.signed_in {
+            return;
+        }
         let open_left = x + self.s(if width >= self.s(920) { 171 } else { 145 });
         let open_rect = rc(open_left, self.s(14), open_left + self.s(98), self.s(45));
         self.button(p, open_rect, "打开 PDF", Some(Action::Open), false);
@@ -407,7 +468,6 @@ impl View {
                 rc(open_rect.right + self.s(16), 0, model_rect.left - self.s(16), self.s(59)), DT_LEFT);
         }
 
-        p.fill(rc(0, self.s(59), width, self.s(60)), LINE);
         p.fill(rc(0, self.s(107), width, self.s(108)), LINE);
         let Some(pages) = self.reader.document.as_ref().map(|document| document.pages) else { return };
         let top = self.s(68);
@@ -441,9 +501,10 @@ impl View {
         p.fill(rc(0, top, width, top + 1), LINE);
         let (status, ink) = self.status();
         let left = self.s(22);
-        p.fill(rc(left, top + self.s(14), left + self.s(6), top + self.s(20)), ink);
-        let has_details = self.reader.models_error.is_some() || self.reader.translation_error.is_some()
-            || self.reader.load_error.is_some() || self.reader.document.as_ref().is_some_and(|pdf| !pdf.notices.is_empty());
+        let has_details = self.reader.models_error.is_some() || self.reader.signed_in && (
+            self.reader.translation_error.is_some() || self.reader.load_error.is_some()
+                || self.reader.document.as_ref().is_some_and(|pdf| !pdf.notices.is_empty())
+        );
         let right = width - left;
         let details = rc(right - self.s(60), top + self.s(4), right, bottom - self.s(4));
         if has_details {
@@ -453,8 +514,36 @@ impl View {
         let update_right = if has_details { details.left - self.s(8) } else { right };
         let update_bounds = rc(update_right - self.s(136), top + self.s(4), update_right, bottom - self.s(4));
         self.button(p, update_bounds, &update.label, update.enabled.then_some(Action::Update), update.primary);
-        p.line_text(&status, SMALL, ink, rc(left + self.s(15), top + 1,
-            update_bounds.left - self.s(12), bottom), DT_LEFT);
+        if !status.is_empty() {
+            p.fill(rc(left, top + self.s(14), left + self.s(6), top + self.s(20)), ink);
+            p.line_text(&status, SMALL, ink, rc(left + self.s(15), top + 1,
+                update_bounds.left - self.s(12), bottom), DT_LEFT);
+        }
+    }
+
+    fn paint_login(&mut self, p: &Painter, body: RECT) {
+        let width = self.s(384).min(body.right - self.s(48));
+        let height = self.s(176);
+        let x = (body.right - width) / 2;
+        let top = body.top + ((body.bottom - body.top - height) / 2).max(self.s(16));
+        let center = body.right / 2;
+        p.round(rc(x, top, x + width, top + height), self.s(16), WHITE, LINE);
+        p.line_text("登录后开始阅读", TITLE, TEXT,
+            rc(x, top + self.s(25), x + width, top + self.s(79)), DT_CENTER);
+        let button_top = top + self.s(96);
+        let button_bottom = top + self.s(140);
+        let signing_in = self.reader.signing_in();
+        if signing_in && self.login_link.is_some() {
+            self.button(p, rc(center - self.s(143), button_top, center + self.s(31), button_bottom),
+                "复制登录链接", Some(Action::CopyLoginLink), true);
+            self.button(p, rc(center + self.s(43), button_top, center + self.s(143), button_bottom),
+                "取消登录", Some(Action::Login), false);
+            return;
+        }
+        let label = if signing_in { "取消登录" } else { "登录 CodeBuddy" };
+        let action = (!self.reader.checking_models).then_some(Action::Login);
+        self.button(p, rc(center - self.s(92), button_top, center + self.s(92), button_bottom),
+            label, action, !signing_in);
     }
 
     fn paint_empty(&mut self, p: &Painter, body: RECT) {

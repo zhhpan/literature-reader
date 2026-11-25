@@ -4,8 +4,8 @@
 
 ## 安装与阅读
 
-1. 在 [GitHub Releases](https://github.com/zhhpan/literature-reader/releases/latest) 下载 Windows x64 安装包并运行。安装程序会联网下载并校验运行所需的 Node.js 和 Poppler。
-2. 从开始菜单打开「Literature Reader」。可从「最近阅读」打开已有记录，单击「打开 PDF」，或将 PDF 拖到窗口。
+1. 在 [GitHub Releases](https://github.com/zhhpan/literature-reader/releases/latest) 下载 Windows x64 安装包并运行。安装程序会下载并校验所需的运行库。升级时，已安装且通过校验的 Node.js 可以复用。
+2. 从开始菜单打开「Literature Reader」，完成 CodeBuddy 登录。进入后可从「最近阅读」打开已有记录，单击「打开 PDF」，或将 PDF 拖到窗口。
 3. 在双语视图连续滚动阅读整篇论文。标题和译名居中，作者信息保留原文，小标题和正文使用不同字样。拖动鼠标选中文字后按 Ctrl+C 复制，也可右键复制整段或切到「PDF 原页」核对版面。
 4. 点正文区块的引用可跳转到对应的文末条目。带 DOI 或来源网址的条目可以打开论文出处。
 5. 阅读位置会自动保存在本机。下次打开内容相同的 PDF 时，双语视图会回到上次读到的段落，原页视图会恢复到上次的页码和页内位置。
@@ -18,7 +18,7 @@
 
 阅读器使用腾讯的 CodeBuddy Agent SDK。国内 WorkBuddy 和 CodeBuddy 同账号共享积分，可选模型以 CodeBuddy 对该账号实际返回的列表为准。 [积分说明](https://www.workbuddy.cn/docs/workbuddy/Pricing)
 
-1. 在右上角「翻译模型」菜单中点「网页登录 CodeBuddy」，用国内 WorkBuddy 的同一账号在浏览器完成授权。登录成功后，应用会刷新可用模型。
+1. 在入口点「登录 CodeBuddy」，使用国内 WorkBuddy 的同一账号完成授权。若默认浏览器支持小窗，应用会在独立登录窗口中打开官方授权页。小窗启动失败时，可以在入口复制授权链接。登录成功后，应用会刷新可用模型。
 2. 在菜单中选择模型后，当前论文会自动从头开始按段翻译。阅读器会记住这次选择。重启后，只要该模型仍对当前账号可用，打开 PDF 就会自动使用它翻译。翻译由账号积分结算。
 3. 译文随模型输出逐步显示，底部状态栏显示段落进度和估算的 token 输出速率。可随时停止翻译，点「继续翻译」可接着翻译尚未完成的段落。
 
