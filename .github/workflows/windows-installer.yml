@@ -1,0 +1,175 @@
+name: Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.91.1-x86_64-pc-windows-msvc
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      CARGO_INCREMENTAL: '0'
+    outputs:
+      artifact: ${{ steps.package.outputs.artifact }}
+      filename: ${{ steps.package.outputs.filename }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      commit: ${{ steps.package.outputs.commit }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '22.23.5'
+          package-manager-cache: false
+
+      - name: Install Rust and its bundled copyright notices
+        run: |
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component rust-docs
+
+      - name: Verify version
+        id: version
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $package = ($metadata | ConvertFrom-Json).packages | Where-Object name -eq 'literature-reader'
+          $version = $package.version
+          if ($version -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw 'Cargo.toml must use a stable three-part version.'
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -cne "v$version") {
+              throw "Tag $env:GITHUB_REF_NAME does not match Cargo version $version."
+          }
+          "value=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Inno Setup
+        id: inno
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.4.exe'
+          $directory = Join-Path $env:RUNNER_TEMP 'InnoSetup6'
+          # Digest from the immutable upstream is-6_7_4 release.
+          $digest = 'a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c'
+          $uri = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe'
+          Invoke-WebRequest -Uri $uri -OutFile $installer -MaximumRetryCount 3 -RetryIntervalSec 2
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $digest) {
+              throw 'Inno Setup download failed SHA-256 verification.'
+          }
+          $arguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/PORTABLE=1', "/DIR=`"$directory`"")
+          $result = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+          $compiler = Join-Path $directory 'ISCC.exe'
+          if ($result.ExitCode -ne 0 -or !(Test-Path -LiteralPath $compiler -PathType Leaf)) {
+              throw "Inno Setup installation failed with exit code $($result.ExitCode)."
+          }
+          "compiler=$compiler" >> $env:GITHUB_OUTPUT
+
+      - name: Build the Windows x64 executable
+        run: |
+          $flags = @('-C', 'target-feature=+crt-static',
+              "--remap-path-prefix=$env:GITHUB_WORKSPACE=/src/literature-reader",
+              "--remap-path-prefix=$env:USERPROFILE=/src/toolchain",
+              '-C', 'link-arg=/PDBALTPATH:%_PDB%')
+          $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Package the installer
+        id: package
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+          ISCC: ${{ steps.inno.outputs.compiler }}
+        run: |
+          .\installer\build.ps1 -Compiler $env:ISCC `
+              -AppExecutable 'target\x86_64-pc-windows-msvc\release\literature-reader.exe'
+          $filename = "LiteratureReader-Setup-$env:APP_VERSION-x64.exe"
+          $installer = Get-Item -LiteralPath "target\release\$filename"
+          if ($installer.VersionInfo.ProductVersion -ne $env:APP_VERSION) {
+              throw 'Installer version does not match Cargo.toml.'
+          }
+          $digest = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "artifact=LiteratureReader-Windows-x64-$env:GITHUB_RUN_ATTEMPT" >> $env:GITHUB_OUTPUT
+          "filename=$filename" >> $env:GITHUB_OUTPUT
+          "sha256=$digest" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "``$filename`` SHA-256 ``$digest``" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload the installer artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: target/release/${{ steps.package.outputs.filename }}
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the installer artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: ${{ runner.temp }}/reader-release
+
+      - name: Publish the verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_COMMIT: ${{ needs.build.outputs.commit }}
+          INSTALLER_NAME: ${{ needs.build.outputs.filename }}
+          INSTALLER_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:GITHUB_REF_NAME
+          $path = Join-Path (Join-Path $env:RUNNER_TEMP 'reader-release') $env:INSTALLER_NAME
+          $installer = Get-Item -LiteralPath $path
+          if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $env:INSTALLER_SHA256) {
+              throw 'Downloaded artifact failed SHA-256 verification.'
+          }
+          $commit = gh api "repos/$repo/commits/$tag" --jq '.sha'
+          if ($LASTEXITCODE -ne 0 -or $commit -ne $env:BUILD_COMMIT) {
+              throw 'Release tag does not point to the built commit.'
+          }
+
+          function Get-Release {
+              $data = gh api --paginate "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == `"$tag`")"
+              if ($LASTEXITCODE -ne 0) { throw 'Could not read releases from GitHub.' }
+              $data | ConvertFrom-Json
+          }
+
+          $release = Get-Release
+          if (!$release) {
+              gh release create $tag $installer.FullName --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $release = Get-Release
+          }
+          $assets = @($release.assets)
+          if ($assets.Count -ne 1 -or $assets[0].name -cne $env:INSTALLER_NAME -or
+              $assets[0].state -ne 'uploaded' -or $assets[0].size -ne $installer.Length -or
+              $assets[0].digest -ne "sha256:$env:INSTALLER_SHA256") {
+              throw "Release $tag must contain only the verified installer. Inspect the existing release before trying again."
+          }
+          if ($release.draft) {
+              $published = gh api --method PATCH "repos/$repo/releases/$($release.id)" -F draft=false -f make_latest=legacy
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $release = $published | ConvertFrom-Json
+          }
+          if ($release.draft -or !$release.published_at) { throw 'GitHub has not published the release.' }
+          $release.html_url

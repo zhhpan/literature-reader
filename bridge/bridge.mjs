@@ -210,9 +210,34 @@ function trackOutput() {
   };
 }
 
-async function translate(session, { model, source, instruction }, output) {
+async function translate(session, input, output, previousTurns, emitUsage) {
+  let usage;
+  try {
+    return await streamTranslation(session, input, output, (message) => {
+      const update = message._meta?.['codebuddy.ai/turnUsage'];
+      if (update?.version !== 1 || update.scope !== 'turn' || !['stage', 'snapshot'].includes(update.kind)
+        || typeof update.requestId !== 'string' || !update.requestId || previousTurns.has(update.requestId)
+        || (usage && usage.requestId !== update.requestId)
+        || (usage?.kind === 'snapshot' && update.kind !== 'snapshot')) return;
+      usage = update;
+    });
+  } finally {
+    if (usage) {
+      previousTurns.add(usage.requestId);
+      const { creditStatus, credits } = usage.total ?? {};
+      const amount = ['known', 'partial'].includes(creditStatus) && Number.isFinite(credits) && credits >= 0
+        ? credits : null;
+      emitUsage({ type: 'translation_credits', amount, complete: usage.kind === 'snapshot' && creditStatus === 'known' && amount !== null });
+    }
+  }
+}
+
+async function streamTranslation(session, { model, source, instruction }, output, observeUsage) {
   await session.send(JSON.stringify({ instruction, source }));
   for await (const message of session.stream()) {
+    if (message.type === 'result' || (message.type === 'system' && message.subtype === 'usage_update')) {
+      observeUsage(message);
+    }
     if (message.type === 'system' && message.subtype === 'init') {
       if (message.model && message.model !== model) {
         throw new BridgeError('CodeBuddy 启动了不同的模型。请刷新模型列表后重试。');
@@ -300,11 +325,13 @@ async function translationWorker(sdk) {
   let rules;
   let session;
   let sessionIncludesOutput;
+  let previousTurns = new Set();
   let batches = 0;
   let sourceChars = 0;
   const closeSession = () => {
     session?.close();
     session = undefined;
+    previousTurns = new Set();
     batches = 0;
     sourceChars = 0;
   };
@@ -340,13 +367,17 @@ async function translationWorker(sdk) {
           sessionIncludesOutput = streamOutput;
         }
         const output = streamOutput ? trackOutput() : undefined;
+        let active = true;
         try {
-          const result = await withTimeout(TRANSLATION_TIMEOUT, () => translate(session, input, output));
+          const result = await withTimeout(TRANSLATION_TIMEOUT, () => translate(session, input, output, previousTurns, (usage) => {
+            if (active) emit(usage);
+          }));
           output?.flush();
           batches += 1;
           sourceChars += input.source.length;
           emit({ type: 'result', ...result });
         } finally {
+          active = false;
           output?.close();
         }
       } catch (error) {

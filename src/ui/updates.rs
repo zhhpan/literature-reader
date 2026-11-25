@@ -8,7 +8,7 @@ enum State {
     Checking { manual: bool },
     Available(Release),
     Downloading { release: Release, percent: u8 },
-    Ready { version: String, installer: VerifiedInstaller },
+    Ready { installer: VerifiedInstaller, automatic: bool },
     Launching,
 }
 
@@ -24,8 +24,8 @@ enum Event {
 
 pub(super) enum Intent {
     Check,
-    Download(String),
-    Install(String),
+    Update(String),
+    RetryInstall,
 }
 
 pub(super) struct Button {
@@ -48,11 +48,11 @@ impl UpdateControl {
         let (label, enabled, primary) = match &self.state {
             State::Idle => ("检查更新".into(), true, false),
             State::Checking { .. } => ("检查更新中…".into(), false, false),
-            State::Available(..) => ("下载更新".into(), true, true),
+            State::Available(release) => (format!("更新到 {}", release.version).into(), true, true),
             State::Downloading { percent: 100, .. } => ("正在校验…".into(), false, false),
             State::Downloading { percent, .. } => (format!("下载中 {percent}%").into(), false, false),
-            State::Ready { .. } => ("安装更新".into(), true, true),
-            State::Launching => ("打开安装程序…".into(), false, false),
+            State::Ready { automatic: false, .. } => ("重试安装".into(), true, true),
+            State::Ready { .. } | State::Launching => ("正在启动更新…".into(), false, false),
         };
         Button { label, enabled, primary }
     }
@@ -60,8 +60,8 @@ impl UpdateControl {
     pub(super) fn intent(&self) -> Option<Intent> {
         match &self.state {
             State::Idle => Some(Intent::Check),
-            State::Available(release) => Some(Intent::Download(release.version.clone())),
-            State::Ready { version, .. } => Some(Intent::Install(version.clone())),
+            State::Available(release) => Some(Intent::Update(release.version.clone())),
+            State::Ready { automatic: false, .. } => Some(Intent::RetryInstall),
             _ => None,
         }
     }
@@ -135,8 +135,8 @@ impl UpdateControl {
             (State::Checking { manual: true }, Ok(Completed::Checked(None))) => {
                 return Some(format!("当前版本 {} 已是最新版本。", update::CURRENT_VERSION));
             }
-            (State::Downloading { release, .. }, Ok(Completed::Downloaded(installer))) => {
-                self.put_installer_back(release.version, installer);
+            (State::Downloading { .. }, Ok(Completed::Downloaded(installer))) => {
+                self.state = State::Ready { installer, automatic: true };
             }
             (State::Downloading { release, .. }, Err(error)) => {
                 self.state = State::Available(release);
@@ -148,9 +148,13 @@ impl UpdateControl {
         None
     }
 
-    pub(super) fn take_installer(&mut self) -> Option<(String, VerifiedInstaller)> {
+    pub(super) fn install_pending(&self) -> bool {
+        matches!(self.state, State::Ready { automatic: true, .. })
+    }
+
+    pub(super) fn take_installer(&mut self) -> Option<VerifiedInstaller> {
         match std::mem::replace(&mut self.state, State::Launching) {
-            State::Ready { version, installer } => Some((version, installer)),
+            State::Ready { installer, .. } => Some(installer),
             previous => {
                 self.state = previous;
                 None
@@ -158,7 +162,7 @@ impl UpdateControl {
         }
     }
 
-    pub(super) fn put_installer_back(&mut self, version: String, installer: VerifiedInstaller) {
-        self.state = State::Ready { version, installer };
+    pub(super) fn put_installer_back(&mut self, installer: VerifiedInstaller) {
+        self.state = State::Ready { installer, automatic: false };
     }
 }

@@ -3,6 +3,7 @@
 mod auth_popup;
 mod citations;
 mod digest;
+mod document_credits;
 mod hyphenation;
 mod math;
 mod math_layout;

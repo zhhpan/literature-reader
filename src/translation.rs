@@ -1,3 +1,4 @@
+use crate::document_credits::TurnCredits;
 use crate::math::{self, ProtectedText};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -65,6 +66,7 @@ enum BridgeEvent {
     SessionVerified { account: Option<Account> },
     OutputDelta { text: String },
     OutputRate { tokens_per_second: f64 },
+    TranslationCredits(TurnCredits),
     Result { models: Option<Vec<Model>>, text: Option<String>, account: Option<Account> },
     Error { message: String },
 }
@@ -84,6 +86,7 @@ pub struct TranslatedText {
 pub enum TranslationUpdate {
     Preview(Vec<(usize, TranslatedText)>),
     Ready(Vec<(usize, TranslatedText)>),
+    Credits(TurnCredits),
 }
 
 impl<'a> Source<'a> {
@@ -265,28 +268,34 @@ impl<'a> Translator<'a> {
         let deadline = Instant::now() + Duration::from_secs(180);
         let mut partial = Some(String::new());
         let mut previous = Vec::new();
-        loop {
-            match self.bridge.receive(deadline, Some(cancel))? {
-                BridgeEvent::OutputRate { tokens_per_second } => (self.on_rate)(tokens_per_second),
-                BridgeEvent::OutputDelta { text } => {
-                    let Some(output) = &mut partial else { continue };
-                    if output.len() + text.len() > MAX_BRIDGE_EVENT_BYTES as usize {
-                        partial = None;
-                        continue;
+        let mut credits = TurnCredits::default();
+        let result = (|| {
+            loop {
+                match self.bridge.receive(deadline, Some(cancel))? {
+                    BridgeEvent::OutputRate { tokens_per_second } => (self.on_rate)(tokens_per_second),
+                    BridgeEvent::TranslationCredits(usage) => credits = usage,
+                    BridgeEvent::OutputDelta { text } => {
+                        let Some(output) = &mut partial else { continue };
+                        if output.len() + text.len() > MAX_BRIDGE_EVENT_BYTES as usize {
+                            partial = None;
+                            continue;
+                        }
+                        output.push_str(&text);
+                        let snapshot = preview_rows(batch, output);
+                        if snapshot != previous {
+                            previous.clone_from(&snapshot);
+                            publish(TranslationUpdate::Preview(snapshot))?;
+                        }
                     }
-                    output.push_str(&text);
-                    let snapshot = preview_rows(batch, output);
-                    if snapshot != previous {
-                        previous.clone_from(&snapshot);
-                        publish(TranslationUpdate::Preview(snapshot))?;
+                    BridgeEvent::Result { text: Some(text), .. } if !text.trim().is_empty() => {
+                        return Ok(text.trim().to_owned());
                     }
+                    _ => return Err("CodeBuddy 没有返回可读取的译文。".into()),
                 }
-                BridgeEvent::Result { text: Some(text), .. } if !text.trim().is_empty() => {
-                    return Ok(text.trim().to_owned());
-                }
-                _ => return Err("CodeBuddy 没有返回可读取的译文。".into()),
             }
-        }
+        })();
+        publish(TranslationUpdate::Credits(credits))?;
+        result
     }
 }
 

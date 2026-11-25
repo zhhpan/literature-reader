@@ -136,6 +136,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 {
                     alert(hwnd, &message);
                 }
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
+                    && IsWindowEnabled(hwnd) != 0
+                    && (*ptr).updates.install_pending()
+                {
+                    install_update(hwnd, ptr);
+                }
             }
             WM_PAINT => paint_window(hwnd, &mut *ptr),
             WM_SETCURSOR if (lparam & 0xffff) as u32 == HTCLIENT => {
@@ -619,48 +625,46 @@ fn activate_update(hwnd: HWND, ptr: *mut View) {
     unsafe {
         let message = match (*ptr).updates.intent() {
             Some(Intent::Check) => (*ptr).updates.check(true),
-            Some(Intent::Download(version)) => {
-                let message = format!("发现新版本 {version}。下载安装包吗？");
+            Some(Intent::Update(version)) => {
+                let mut message = format!("下载并更新到 {version}？更新会保存阅读位置，在原安装目录安装并重新打开阅读器。");
+                if (*ptr).reader.translation.is_some() {
+                    message.push_str("\r\n\r\n安装开始时，正在进行的翻译会停止。");
+                }
                 if !confirm_update(hwnd, &message) || GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
                     return;
                 }
                 (*ptr).updates.download()
             }
-            Some(Intent::Install(version)) => {
-                let mut message = format!("安装版本 {version} 需要关闭阅读器。");
-                if (*ptr).reader.translation.is_some() {
-                    message.push_str("正在进行的翻译会停止。");
-                }
-                message.push_str("现在安装吗？");
-                if !confirm_update(hwnd, &message) || GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
-                    return;
-                }
-                let pending = {
-                    let view = &mut *ptr;
-                    view.flush_reading_position();
-                    view.updates.take_installer()
-                };
-                let Some((version, installer)) = pending else { return };
-                let result = crate::update::launch(&installer, hwnd);
-                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
-                    return;
-                }
-                match result {
-                    Ok(()) => {
-                        DestroyWindow(hwnd);
-                        return;
-                    }
-                    Err(error) => {
-                        (*ptr).updates.put_installer_back(version, installer);
-                        Some(error)
-                    }
-                }
+            Some(Intent::RetryInstall) => {
+                install_update(hwnd, ptr);
+                return;
             }
             None => return,
         };
         redraw(hwnd);
         if let Some(message) = message {
             alert(hwnd, &message);
+        }
+    }
+}
+
+fn install_update(hwnd: HWND, ptr: *mut View) {
+    unsafe {
+        let Some(installer) = (*ptr).updates.take_installer() else { return };
+        (*ptr).flush_reading_position();
+        let result = crate::update::launch(&installer, hwnd);
+        if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                DestroyWindow(hwnd);
+            }
+            Err(error) => {
+                (*ptr).updates.put_installer_back(installer);
+                redraw(hwnd);
+                alert(hwnd, &error);
+            }
         }
     }
 }

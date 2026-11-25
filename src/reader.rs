@@ -1,4 +1,5 @@
 use crate::citations::{self, CitationLink, SourceLink};
+use crate::document_credits::{self, DocumentCredits, TurnCredits};
 use crate::model_settings;
 use crate::pdf::{self, BlockKind, Document};
 use crate::reading_position::{self, ReadingPosition};
@@ -119,6 +120,8 @@ enum Event {
     LoginEnded(Result<Option<Account>, String>),
     CacheLoaded(u64, io::Result<(Cache, TranslationRows)>),
     CacheSaved(u64),
+    CreditsLoaded(usize, DocumentCredits),
+    CreditsRecorded { pdf_id: PdfId, key: Option<String>, usage: TurnCredits },
     TranslationRate { revision: u64, rate: f64 },
     TranslationPreview { revision: u64, rows: TranslationRows },
     Translated { revision: u64, rows: TranslationRows, saved: bool },
@@ -181,6 +184,7 @@ pub struct Reader {
     pub translation_model: Option<String>,
     pub translation: Option<ActiveTranslation>,
     pub translation_error: Option<String>,
+    pub credits: DocumentCredits,
     preferred_model: Option<String>,
     pdf_id: Option<PdfId>,
     reading_position: Option<ReadingPosition>,
@@ -231,6 +235,7 @@ impl Reader {
             translation_model: None, translation: None, translation_requested: false,
             translation_total: 0, translation_preview: HashMap::new(), changed_translations: Vec::new(),
             translation_error: None, login_cancel: None, login_url: None,
+            credits: DocumentCredits::default(),
             images: HashMap::new(), image_bytes: 0,
             image_use: 0, failed_images: HashMap::new(), requested_images: HashSet::new(),
             render_jobs, send, events,
@@ -246,6 +251,7 @@ impl Reader {
         self.path = Some(path.clone());
         self.document = None;
         self.pdf_id = None;
+        self.credits = DocumentCredits::default();
         self.reading_position = None;
         self.citation_links.clear();
         self.reference_links.clear();
@@ -426,7 +432,7 @@ impl Reader {
         if !self.translation_requested || self.translation.is_some() || !self.can_translate() {
             return;
         }
-        let (Some(document), Some(model)) = (&self.document, self.model.clone()) else {
+        let (Some(document), Some(model), Some(pdf_id)) = (&self.document, self.model.clone(), self.pdf_id) else {
             return;
         };
         let CacheState::Ready(cache) = &self.translation_cache else { return };
@@ -455,7 +461,7 @@ impl Reader {
                     save_translations(&cache, &document, &unsaved)?;
                     let _ = send.send(Event::CacheSaved(revision));
                 }
-                translate(revision, &model, &document, &input, &cache, &cancel, &send)
+                translate(revision, pdf_id, &model, &document, &input, &cache, &cancel, &send)
             })();
             let _ = send.send(Event::TranslationEnded(generation, result));
         });
@@ -522,6 +528,12 @@ impl Reader {
                                 let _ = self.recent_documents.record(id, path, &document.title);
                             }
                             self.pdf_id = pdf_id;
+                            if let Some(pdf_id) = pdf_id {
+                                let send = self.send.clone();
+                                thread::spawn(move || {
+                                    let _ = send.send(Event::CreditsLoaded(generation, document_credits::load(pdf_id)));
+                                });
+                            }
                             self.reading_position = reading_position;
                             self.translations.resize(document.blocks.len(), None);
                             self.translation_math.resize_with(document.blocks.len(), Vec::new);
@@ -597,6 +609,12 @@ impl Reader {
                 }
                 Event::CacheSaved(revision) if revision == self.translation_layout_reset => {
                     self.unsaved_translations.clear();
+                }
+                Event::CreditsLoaded(generation, history) if generation == self.generation => {
+                    self.credits.merge(history);
+                }
+                Event::CreditsRecorded { pdf_id, key, usage } if Some(pdf_id) == self.pdf_id => {
+                    self.credits.record(key, usage);
                 }
                 Event::TranslationRate { revision, rate } if revision == self.translation_layout_reset => {
                     if let Some(job) = self.translation.as_mut().filter(|job| !job.stopping()) {
@@ -707,6 +725,7 @@ fn save_translations(cache: &Cache, document: &Document, rows: &[(usize, Transla
 
 fn translate(
     revision: u64,
+    pdf_id: PdfId,
     model: &str,
     document: &Document,
     input: &[usize],
@@ -743,6 +762,10 @@ fn translate(
                     let rows = block_rows(rows);
                     let saved = save_translations(cache, document, &rows);
                     (Event::Translated { revision, rows, saved: saved.is_ok() }, saved)
+                }
+                TranslationUpdate::Credits(usage) => {
+                    let key = document_credits::save(pdf_id, usage).ok();
+                    (Event::CreditsRecorded { pdf_id, key, usage }, Ok(()))
                 }
             };
             if send.send(event).is_err() {

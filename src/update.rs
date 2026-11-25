@@ -216,9 +216,15 @@ fn lock_verified(path: &Path, release: &Release) -> Result<File, String> {
 }
 
 pub fn launch(installer: &VerifiedInstaller, owner: HWND) -> Result<(), String> {
+    let reader = std::env::current_exe().map_err(|error| format!("无法定位当前安装位置：{error}"))?;
     let path: Vec<u16> = installer.path.as_os_str().encode_wide().chain([0]).collect();
     let verb: Vec<u16> = "open".encode_utf16().chain([0]).collect();
-    let arguments: Vec<u16> = "/READERUPDATE=1".encode_utf16().chain([0]).collect();
+    let options = format!(
+        "/READERUPDATE=1 /SILENT /SP- /NORESTART /READERPID={} /READEREXE=\"",
+        std::process::id()
+    );
+    let arguments: Vec<u16> = options.encode_utf16().chain(reader.as_os_str().encode_wide())
+        .chain([b'"' as u16, 0]).collect();
     let result = unsafe { ShellExecuteW(owner, verb.as_ptr(), path.as_ptr(), arguments.as_ptr(), null(), SW_SHOWNORMAL) };
     if result as isize <= 32 {
         return Err(format!("Windows 未能启动安装程序（{}）。", result as isize));

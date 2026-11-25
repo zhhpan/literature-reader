@@ -549,10 +549,33 @@ impl View {
         let update_right = if has_details { details.left - self.s(8) } else { right };
         let update_bounds = rc(update_right - self.s(136), top + self.s(4), update_right, bottom - self.s(4));
         self.button(p, update_bounds, &update.label, update.enabled.then_some(Action::Update), update.primary);
+        let mut status_right = update_bounds.left - self.s(12);
+        if self.reader.signed_in && self.reader.document.is_some() {
+            let (amount, incomplete) = self.reader.credits.summary();
+            let label = if let Some(amount) = amount {
+                let formatted = format!("{amount:.4}");
+                let amount = if amount > 0.0 && formatted == "0.0000" {
+                    "<0.0001"
+                } else {
+                    formatted.trim_end_matches('0').trim_end_matches('.')
+                };
+                let qualifier = if incomplete { "（部分）" } else { "" };
+                format!("已记录 {amount} 积分{qualifier}")
+            } else if incomplete {
+                "积分用量不完整".into()
+            } else {
+                "文档积分未记录".into()
+            };
+            let badge_width = p.text_width(&label, SMALL) + self.s(16);
+            let badge = rc(status_right - badge_width, top + self.s(5), status_right, bottom - self.s(5));
+            p.round(badge, self.s(7), TINT, LINE);
+            p.line_text(&label, SMALL, ACCENT_DARK, badge, DT_CENTER);
+            status_right = badge.left - self.s(10);
+        }
         if !status.is_empty() {
             p.fill(rc(left, top + self.s(14), left + self.s(6), top + self.s(20)), ink);
             p.line_text(&status, SMALL, ink, rc(left + self.s(15), top + 1,
-                update_bounds.left - self.s(12), bottom), DT_LEFT);
+                status_right, bottom), DT_LEFT);
         }
     }
 

@@ -80,6 +80,7 @@ Name: "{autoprograms}\Literature Reader"; Filename: "{app}\literature-reader.exe
 Name: "{autodesktop}\Literature Reader"; Filename: "{app}\literature-reader.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\literature-reader.exe"; WorkingDir: "{app}"; Flags: postinstall nowait skipifnotsilent; Check: IsReaderUpdate
 Filename: "{app}\literature-reader.exe"; Description: "Reopen Literature Reader"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent; Check: IsReaderUpdate
 Filename: "{app}\literature-reader.exe"; Description: "Open Literature Reader"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent unchecked; Check: not IsReaderUpdate
 
@@ -91,10 +92,24 @@ const
   NodeExecutableHash = '247e9693d316da9857e44990e5e11709f596f18112251b8026ec6eed80bdf38a';
   PopplerUrl = 'https://github.com/oschwartz10612/poppler-windows/releases/download/v26.09.0-0/Release-26.09.0-0.zip';
   PopplerHash = '7a6f256a0ddf7536182246a5733331bf4677cbcc34f4663774947ad34556c8d0';
+  SynchronizeAccess = $00100000;
+  ErrorInvalidParameter = 87;
+  WaitObject0 = 0;
+  CompareEqual = 2;
 
 var
   DownloadPage: TDownloadWizardPage;
   ReuseNodeRuntime: Boolean;
+
+function OpenReaderProcess(Access: Cardinal; InheritHandle: LongInt; ProcessId: Cardinal): THandle;
+external 'OpenProcess@kernel32.dll stdcall';
+function WaitForReaderProcess(ProcessHandle: THandle; Timeout: Cardinal): Cardinal;
+external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseReaderProcess(ProcessHandle: THandle): LongInt;
+external 'CloseHandle@kernel32.dll stdcall';
+function CompareReaderPaths(Left: String; LeftLength: LongInt; Right: String; RightLength: LongInt;
+  IgnoreCase: LongInt): LongInt;
+external 'CompareStringOrdinal@kernel32.dll stdcall';
 
 function IsReaderUpdate: Boolean;
 begin
@@ -104,6 +119,38 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := (PageID = wpSelectDir) and IsReaderUpdate;
+end;
+
+function NormalReaderPath(Path: String): String;
+begin
+  Result := Path;
+  if Copy(Path, 1, 8) = '\\?\UNC\' then
+    Result := '\\' + Copy(Path, 9, Length(Path) - 8)
+  else if Copy(Path, 1, 4) = '\\?\' then
+    Delete(Result, 1, 4);
+end;
+
+function WaitForReaderToClose: Boolean;
+var
+  ReaderPid: Int64;
+  ReaderProcess: THandle;
+begin
+  Result := False;
+  ReaderPid := StrToInt64Def(ExpandConstant('{param:READERPID|0}'), 0);
+  if (ReaderPid <= 0) or (ReaderPid > $FFFFFFFF) then
+    Exit;
+  ReaderProcess := OpenReaderProcess(SynchronizeAccess, 0, Cardinal(ReaderPid));
+  if ReaderProcess = 0 then
+  begin
+    { OpenProcess reports this error when the reader has already exited. }
+    Result := DLLGetLastError = ErrorInvalidParameter;
+    Exit;
+  end;
+  try
+    Result := WaitForReaderProcess(ReaderProcess, 15000) = WaitObject0;
+  finally
+    CloseReaderProcess(ReaderProcess);
+  end;
 end;
 
 function NeedsNodeRuntime: Boolean;
@@ -135,10 +182,28 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
+  ReaderExe: String;
+  InstalledExe: String;
   Staging: String;
   PopplerBin: String;
 begin
   Result := '';
+  if IsReaderUpdate and WizardSilent then
+  begin
+    ReaderExe := NormalReaderPath(ExpandConstant('{param:READEREXE|}'));
+    InstalledExe := NormalReaderPath(ExpandConstant('{app}\literature-reader.exe'));
+    if (CompareReaderPaths(ReaderExe, -1, InstalledExe, -1, 1) <> CompareEqual) or
+       not FileExists(ReaderExe) then
+    begin
+      Result := 'Setup could not identify the existing installation folder. Run the installer manually.';
+      Exit;
+    end;
+    if not WaitForReaderToClose then
+    begin
+      Result := 'Setup could not confirm that Literature Reader has closed. Open the reader and try updating again.';
+      Exit;
+    end;
+  end;
   Staging := ExpandConstant('{tmp}\reader-deps');
   ReuseNodeRuntime := HasPinnedNodeRuntime;
   DownloadPage.Clear;
