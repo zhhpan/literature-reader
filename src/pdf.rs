@@ -138,22 +138,22 @@ pub fn extract(path: &Path) -> Result<Document, String> {
     let mut references = false;
     let mut empty_pages = Vec::new();
     let mut assets_by_page = HashMap::new();
-    for page in &pages {
+    let columns: Vec<_> = pages.iter().map(page_columns).collect();
+    for (page, page_columns) in pages.iter().zip(&columns) {
         if page.groups.is_empty() {
             empty_pages.push(page.number.to_string());
         }
-        let columns = column_split(page);
         let title_here = title_group.filter(|_| page.number == main_page.number);
         let mut page_blocks = text_blocks(page, size, &repeated_margins, title_here, &hyphenation);
         join_aligned_fragments(&mut page_blocks);
         join_equation_fragments(&mut page_blocks);
         join_display_assignments(&mut page_blocks, page);
         attach_equation_numbers(&mut page_blocks, page.width);
-        let assets = add_assets(page, &mut page_blocks, columns, images.get(&page.number));
+        let assets = add_assets(page, &mut page_blocks, page_columns, images.get(&page.number));
         if !assets.is_empty() {
             assets_by_page.insert(page.number, assets);
         }
-        for mut block in order_page(page, page_blocks, columns) {
+        for mut block in order_page(page, page_blocks, page_columns) {
             if block.kind == BlockKind::Heading && is_reference_heading(&block.text) {
                 references = true;
                 block.kind = BlockKind::ReferenceHeading;
@@ -170,9 +170,9 @@ pub fn extract(path: &Path) -> Result<Document, String> {
         let suffix = if empty_pages.len() > 8 { format!("等 {} 页", empty_pages.len()) } else { "页".into() };
         notices.push(format!("第 {preview} {suffix}没有可提取的文字，可查看原始页面。"));
     }
-    let blocks = merge_reference_fragments(blocks, &pages);
+    let blocks = merge_reference_fragments(blocks, &columns);
     let mut paragraph_continuations = HashMap::new();
-    let (blocks, native_inline) = merge_paragraph_fragments(blocks, &pages, size, &hyphenation, &mut paragraph_continuations);
+    let (blocks, native_inline) = merge_paragraph_fragments(blocks, &pages, &columns, size, &hyphenation, &mut paragraph_continuations);
     let asset_captions = link_asset_captions(&blocks, &assets_by_page);
     let list_groups = collect_list_groups(&blocks, size);
     let mut native_equations = HashMap::new();
@@ -351,13 +351,52 @@ fn parse_layout(bytes: &[u8]) -> Result<Vec<Page>, String> {
                 line.font_heights.sort_unstable_by(f32::total_cmp);
             }
         }
-        page.groups.retain(|group| !group.is_empty());
+        join_drop_caps(&mut page.groups);
     }
     if pages.is_empty() {
         Err("Poppler 未返回页面。请确认 PDF 可以打开，并使用支持 -tsv 的 Poppler。".into())
     } else {
         Ok(pages)
     }
+}
+
+fn join_drop_caps(groups: &mut Vec<Vec<Line>>) {
+    for index in 0..groups.len() {
+        let [cap] = groups[index].as_slice() else { continue };
+        let [glyph] = cap.words.as_slice() else { continue };
+        if cap.text.chars().count() != 1 || !cap.text.starts_with(char::is_uppercase) {
+            continue;
+        }
+        let glyph = glyph.bounds;
+        let Some((next, _)) = groups.iter().enumerate().filter_map(|(other, lines)| {
+            let [first, second, ..] = lines.as_slice() else { return None };
+            let head = first.words.first()?.bounds;
+            let height = first.font_height();
+            let gap = head.left - glyph.right;
+            let offset = head.top - glyph.top;
+            // A drop cap sits beside the first word and extends into the next line.
+            (first.words.len() >= 3 && first.text.starts_with(char::is_lowercase)
+                && glyph.left < head.left && glyph.height() >= height * 1.5
+                && (-height * 0.35..=height * 0.6).contains(&gap)
+                && (-height * 0.25..=glyph.height() * 0.45).contains(&offset)
+                && head.bottom <= glyph.bottom + height * 0.2
+                && second.bounds.top > head.top && second.bounds.top <= glyph.bottom + height * 0.2
+                && second.bounds.left >= glyph.right - height * 0.35)
+                .then_some((other, head.top))
+        }).min_by(|(_, left), (_, right)| left.total_cmp(right)) else { continue };
+
+        let cap = groups[index].pop().expect("isolated drop cap");
+        // Keep body baselines and font sizes for paragraph and column detection.
+        let first = &mut groups[next][0];
+        let prefix_length = cap.text.len();
+        first.text.insert_str(0, &cap.text);
+        first.words[0].bounds = first.words[0].bounds.union(glyph);
+        first.words[0].text.end += prefix_length;
+        for word in &mut first.words[1..] {
+            word.text = word.text.start + prefix_length..word.text.end + prefix_length;
+        }
+    }
+    groups.retain(|group| !group.is_empty());
 }
 
 fn append_word(line: &mut String, word: &str) {
@@ -415,7 +454,7 @@ fn body_size(pages: &[Page]) -> f32 {
 }
 
 fn find_title(page: &Page, body: f32) -> Option<usize> {
-    page.groups.iter().enumerate().filter_map(|(index, group)| {
+    let conventional = page.groups.iter().enumerate().filter_map(|(index, group)| {
         let first = group.first()?;
         let height = first.font_height();
         let text = join_lines(group, None);
@@ -424,10 +463,19 @@ fn find_title(page: &Page, body: f32) -> Option<usize> {
             && first.bounds.width() > page.width * 0.14
             && !known_heading(&text) && caption_type(&text).is_none()).then_some((index, height))
     }).max_by(|left, right| left.1.total_cmp(&right.1).then_with(|| right.0.cmp(&left.0)))
-        .map(|(index, _)| index)
+        .map(|(index, _)| index);
+    conventional.or_else(|| {
+        page.groups.iter().enumerate()
+            .filter(|(_, group)| cover_byline_band(page, group, body).is_some())
+            .max_by(|(_, left), (_, right)| left[0].font_height().total_cmp(&right[0].font_height()))
+            .map(|(index, _)| index)
+    })
 }
 
 fn author_band(page: &Page, title: usize, body_size: f32) -> Option<(f32, f32)> {
+    if let Some(band) = cover_byline_band(page, &page.groups[title], body_size) {
+        return Some(band);
+    }
     let title_end = page.groups[title].iter().map(|line| line.bounds.bottom).max_by(f32::total_cmp)?;
     let lines = || page.groups.iter().flatten().filter(|line| line.bounds.top >= title_end - 2.0);
     let body_start = lines().filter(|line| {
@@ -439,6 +487,31 @@ fn author_band(page: &Page, title: usize, body_size: f32) -> Option<(f32, f32)> 
             && is_byline(&line.text)
     }).map(|line| line.bounds.top).min_by(f32::total_cmp)?;
     Some((first_author - 3.0, body_start - 1.0))
+}
+
+fn cover_byline_band(page: &Page, headline: &[Line], body: f32) -> Option<(f32, f32)> {
+    let [first, _, ..] = headline else { return None };
+    let height = first.font_height();
+    // Illustrated first pages can put a large headline across the image and the byline above it.
+    if page.number != 1 || !(0.33..=0.62).contains(&(first.bounds.top / page.height))
+        || height < (body * 2.25).max(22.0) || first.bounds.width() <= page.width * 0.27
+        || caption_type(&first.text).is_some() || headline.iter().any(|line| {
+            (line.bounds.left - first.bounds.left).abs() > body || line.font_height() < height * 0.8
+        })
+        || headline.iter().flat_map(|line| line.text.chars()).filter(|c| c.is_alphabetic()).count() < 20
+    {
+        return None;
+    }
+    page.groups.iter().filter_map(|group| {
+        let start = group.first()?;
+        let end = group.last()?;
+        (start.bounds.top <= page.height * 0.28 && first.bounds.top - end.bounds.bottom >= body * 4.0
+            && (start.bounds.left - first.bounds.left).abs() <= body
+            && start.font_height() <= body * 1.25 && is_byline(&start.text)
+            && group.iter().any(|line| is_author_affiliation(&line.text))
+            && group.iter().all(|line| is_byline(&line.text) || is_author_affiliation(&line.text)))
+            .then_some((start.bounds.top - 3.0, end.bounds.bottom + 1.0))
+    }).max_by(|left, right| left.0.total_cmp(&right.0))
 }
 
 fn is_byline(text: &str) -> bool {
@@ -604,6 +677,11 @@ fn text_blocks(page: &Page, body: f32, margins: &HashSet<String>, title: Option<
             let item = (kind == BlockKind::Paragraph).then(|| ListMarker::from_text(&group[start].text)).flatten();
             let continues_item = item.is_some() && next_kind == BlockKind::Paragraph && !starts_item
                 && group[start].words.get(1).is_some_and(|word| (line.bounds.left - word.bounds.left).abs() <= body * 0.55);
+            let starts_indented_paragraph = new_indent && kind == BlockKind::Paragraph
+                && (!continues_item && gap >= 0.0 || gap >= -body * 0.25
+                    && line.text.starts_with(char::is_uppercase)
+                    && last.text.trim_end_matches(['”', '’', '"', '\'', ')', ']']).ends_with(['.', '!', '?'])
+                    && group[start..index].iter().any(|earlier| earlier.bounds.right - last.bounds.right >= body * 1.7));
             let introduces_list = next_kind == BlockKind::Paragraph && !starts_item
                 && line.text.ends_with([':', '：']) && last.text.ends_with(['.', '?', '!', '。', '？', '！'])
                 && item.is_some_and(|item| group.get(index + 1).is_some_and(|next| {
@@ -633,7 +711,7 @@ fn text_blocks(page: &Page, body: f32, margins: &HashSet<String>, title: Option<
             let leaves_caption = kind == BlockKind::Caption;
             if starts_section || changes_equation || displaced_equation || changes_authorship || leaves_caption || kind == BlockKind::Heading
                 || baseline_gap > leading * 1.42 || starts_item || introduces_list
-                || (new_indent && !continues_item && kind == BlockKind::Paragraph && gap >= 0.0)
+                || starts_indented_paragraph
                 || starts_reference_entry(&line.text)
             {
                 blocks.push(make_block(page.number, kind, &group[start..index], hyphenation));
@@ -832,12 +910,11 @@ fn numbered_reference(text: &str) -> bool {
         .is_some_and(|label| (1..=3).contains(&label.len()) && label.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-fn merge_reference_fragments(blocks: Vec<Block>, pages: &[Page]) -> Vec<Block> {
-    let columns: HashMap<_, _> = pages.iter().map(|page| (page.number, column_split(page))).collect();
+fn merge_reference_fragments(blocks: Vec<Block>, columns: &[PageColumns]) -> Vec<Block> {
     let column_key = |block: &Block| {
-        (block.page, columns.get(&block.page).and_then(|split| *split).is_some_and(|split| block.bounds.left > split - 10.0))
+        (block.page, columns.get(block.page - 1).and_then(|layout| layout.lane(block.bounds)))
     };
-    let mut edges = HashMap::<(usize, bool), f32>::new();
+    let mut edges = HashMap::new();
     for block in blocks.iter().filter(|block| block.kind == BlockKind::Reference) {
         let edge = edges.entry(column_key(block)).or_insert(block.bounds.left);
         *edge = edge.min(block.bounds.left);
@@ -871,28 +948,21 @@ fn merge_reference_fragments(blocks: Vec<Block>, pages: &[Page]) -> Vec<Block> {
     output
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TextColumn {
-    FullWidth,
-    Left,
-    Right,
-}
-
 #[derive(Clone, Copy)]
 struct ParagraphLocation {
     page: usize,
     page_height: f32,
-    column: TextColumn,
+    column: Option<usize>,
+    column_count: usize,
     bounds: Bounds,
     first_line_indent: f32,
 }
 
 fn merge_paragraph_fragments(
-    blocks: Vec<Block>, pages: &[Page], body: f32,
+    blocks: Vec<Block>, pages: &[Page], columns: &[PageColumns], body: f32,
     hyphenation: &Hyphenation,
     continuations: &mut HashMap<usize, Vec<(usize, Bounds)>>,
 ) -> (Vec<Block>, HashMap<usize, String>) {
-    let columns: Vec<_> = pages.iter().map(column_split).collect();
     let mut output: Vec<Block> = Vec::with_capacity(blocks.len());
     let mut native_inline = HashMap::new();
     let mut previous: Option<ParagraphLocation> = None;
@@ -900,7 +970,7 @@ fn merge_paragraph_fragments(
         let page = block.page.checked_sub(1).and_then(|index| pages.get(index))
             .filter(|_| block.kind == BlockKind::Paragraph);
         let inline = page.and_then(|page| inline_equation_text(&block, page));
-        let location = page.map(|page| paragraph_location(&block, page, columns[block.page - 1]));
+        let location = page.map(|page| paragraph_location(&block, page, &columns[block.page - 1]));
         let continuation = output.last().zip(previous).zip(location).is_some_and(|((last, previous), next)| {
             paragraph_continues(last, &block, previous, next, body)
         });
@@ -916,8 +986,8 @@ fn merge_paragraph_fragments(
             }
             append_text_fragment(&mut last.text, &block.text, Some(hyphenation));
             // A block's source coordinates refer to the lane where the paragraph starts.
-            let same_column = page.zip(location).is_some_and(|(page, location)| {
-                paragraph_column(last.bounds, page.width, columns[block.page - 1]) == location.column
+            let same_column = location.is_some_and(|location| {
+                columns[block.page - 1].lane(last.bounds) == location.column
             });
             if last.page == block.page && same_column {
                 last.bounds = last.bounds.union(block.bounds);
@@ -935,20 +1005,14 @@ fn merge_paragraph_fragments(
     (output, native_inline)
 }
 
-fn paragraph_location(block: &Block, page: &Page, split: Option<f32>) -> ParagraphLocation {
+fn paragraph_location(block: &Block, page: &Page, columns: &PageColumns) -> ParagraphLocation {
     let bounds = block.bounds;
-    let column = paragraph_column(bounds, page.width, split);
     let first_line_indent = page.groups.iter().flatten().find(|line| {
         (line.bounds.top - bounds.top).abs() < 0.5 && contains_bounds(bounds, line.bounds)
     }).map_or(0.0, |line| line.bounds.left - bounds.left);
-    ParagraphLocation { page: block.page, page_height: page.height, column, bounds, first_line_indent }
-}
-
-fn paragraph_column(bounds: Bounds, width: f32, split: Option<f32>) -> TextColumn {
-    match split {
-        Some(split) if bounds.right <= split + width * 0.025 => TextColumn::Left,
-        Some(split) if bounds.left >= split - width * 0.025 => TextColumn::Right,
-        _ => TextColumn::FullWidth,
+    ParagraphLocation {
+        page: block.page, page_height: page.height, column: columns.lane(bounds), column_count: columns.lane_count(),
+        bounds, first_line_indent,
     }
 }
 
@@ -963,21 +1027,27 @@ fn paragraph_continues(
         return false;
     }
 
-    if previous.page == next.page && previous.column == next.column {
+    if previous.page == next.page {
         let gap = next.bounds.top - previous.bounds.bottom;
         let indent = next.bounds.left - previous.bounds.left;
-        return (-1.0..=body * 1.15).contains(&gap) && (-body * 1.7..=body * 0.55).contains(&indent);
+        return match (previous.column, next.column) {
+            // A narrow column can pick up the paragraph that started across the page above it.
+            (None, Some(0)) => {
+                (-1.0..=body * 1.15).contains(&gap) && indent.abs() <= body * 0.55
+            }
+            (left, right) if left == right => {
+                (-1.0..=body * 1.15).contains(&gap) && (-body * 1.7..=body * 0.55).contains(&indent)
+            }
+            // In a mixed layout the top of the next column can be well below the page top.
+            (Some(left), Some(right)) => right == left + 1 && gap <= 0.0,
+            _ => false,
+        };
     }
 
-    if previous.bounds.bottom < previous.page_height * 0.58 || next.bounds.top > next.page_height * 0.34 {
-        return false;
-    }
-    if previous.page == next.page {
-        previous.column == TextColumn::Left && next.column == TextColumn::Right
-    } else {
-        next.page.checked_sub(previous.page) == Some(1)
-            && previous.column != TextColumn::Left && next.column != TextColumn::Right
-    }
+    next.page.checked_sub(previous.page) == Some(1)
+        && previous.column.is_none_or(|column| column + 1 == previous.column_count)
+        && next.column.is_none_or(|column| column == 0)
+        && previous.bounds.bottom >= previous.page_height * 0.58 && next.bounds.top <= next.page_height * 0.34
 }
 
 fn equation_number(text: &str) -> bool {
@@ -1318,7 +1388,35 @@ fn inline_equation_text(block: &Block, page: &Page) -> Option<String> {
     Some(source)
 }
 
-fn column_split(page: &Page) -> Option<f32> {
+struct PageColumns {
+    width: f32,
+    gutters: Vec<f32>,
+}
+
+impl PageColumns {
+    fn lane_count(&self) -> usize {
+        self.gutters.len() + 1
+    }
+
+    fn lane(&self, bounds: Bounds) -> Option<usize> {
+        self.lane_with_margin(bounds, self.width * 0.025)
+    }
+
+    fn lane_with_margin(&self, bounds: Bounds, margin: f32) -> Option<usize> {
+        if self.gutters.iter().any(|&gutter| bounds.left < gutter - margin && bounds.right > gutter + margin) {
+            return None;
+        }
+        Some(self.gutters.partition_point(|&gutter| gutter <= bounds.center()))
+    }
+}
+
+fn page_columns(page: &Page) -> PageColumns {
+    let gutters = three_column_gutters(page).map(Vec::from)
+        .unwrap_or_else(|| two_column_gutter(page).into_iter().collect());
+    PageColumns { width: page.width, gutters }
+}
+
+fn two_column_gutter(page: &Page) -> Option<f32> {
     let midpoint = page.width * 0.5;
     let mut left = 0;
     let mut right = 0;
@@ -1336,10 +1434,71 @@ fn column_split(page: &Page) -> Option<f32> {
     (left >= 2 && right >= 2).then_some(midpoint)
 }
 
-fn order_page(page: &Page, mut blocks: Vec<Block>, split: Option<f32>) -> Vec<Block> {
+fn three_column_gutters(page: &Page) -> Option<[f32; 2]> {
+    let width = page.width;
+    let mut lines: Vec<_> = page.groups.iter().flatten().filter_map(|line| {
+        let bounds = line.bounds;
+        ((width * 0.14..=width * 0.34).contains(&bounds.width())
+            && line.text.chars().count() >= 24).then_some(bounds)
+    }).collect();
+    lines.sort_by(|left, right| left.left.total_cmp(&right.left));
+
+    let mut alignments: Vec<Vec<Bounds>> = Vec::new();
+    for line in lines {
+        if let Some(aligned) = alignments.last_mut().filter(|aligned| line.left - aligned[0].left <= width * 0.012) {
+            aligned.push(line);
+        } else {
+            alignments.push(vec![line]);
+        }
+    }
+    alignments.retain(|lines| lines.len() >= 3);
+
+    for (left_index, left) in alignments.iter().enumerate() {
+        for (middle_index, middle) in alignments.iter().enumerate().skip(left_index + 1) {
+            let stride = middle[0].left - left[0].left;
+            if !(width * 0.20..=width * 0.34).contains(&stride) {
+                continue;
+            }
+            let expected = middle[0].left + stride;
+            for right in alignments.iter().skip(middle_index + 1) {
+                if (right[0].left - expected).abs() > width * 0.04 {
+                    continue;
+                }
+                if let Some(gutters) = parallel_text_gutters([left, middle, right], width) {
+                    return Some(gutters);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parallel_text_gutters(columns: [&[Bounds]; 3], page_width: f32) -> Option<[f32; 2]> {
+    let top = columns.iter().filter_map(|col| col.iter().map(|line| line.top).min_by(f32::total_cmp))
+        .max_by(f32::total_cmp)?;
+    let bottom = columns.iter().filter_map(|col| col.iter().map(|line| line.bottom).max_by(f32::total_cmp))
+        .min_by(f32::total_cmp)?;
+    let right_edges = columns.map(|col| {
+        let mut edges: Vec<_> = col.iter().filter(|line| line.bottom > top && line.top < bottom)
+            .map(|line| line.right).collect();
+        if edges.len() < 3 { return None; }
+        edges.sort_unstable_by(f32::total_cmp);
+        Some(edges[edges.len() * 3 / 4])
+    });
+    let [Some(first), Some(second), Some(_)] = right_edges else { return None; };
+    let edges = [(first, columns[1][0].left), (second, columns[2][0].left)];
+    if !edges.iter().all(|&(end, start)| (page_width * 0.008..=page_width * 0.09).contains(&(start - end))) {
+        return None;
+    }
+    Some(edges.map(|(end, start)| (end + start) * 0.5))
+}
+
+fn order_page(page: &Page, mut blocks: Vec<Block>, columns: &PageColumns) -> Vec<Block> {
     blocks.sort_by(|left, right| left.bounds.top.total_cmp(&right.bounds.top)
         .then_with(|| left.bounds.left.total_cmp(&right.bounds.left)));
-    let Some(split) = split else { return blocks; };
+    if columns.lane_count() == 1 {
+        return blocks;
+    }
     let front_end = if blocks.iter().any(|block| block.kind == BlockKind::Title) {
         blocks.iter().filter(|block| block.bounds.top < page.height * 0.53).find(|block| {
             starts_abstract(&block.text) || section_name(&block.text) == "introduction"
@@ -1348,22 +1507,22 @@ fn order_page(page: &Page, mut blocks: Vec<Block>, split: Option<f32>) -> Vec<Bl
         0.0
     };
     let mut ordered = Vec::with_capacity(blocks.len());
-    let (mut left, mut right) = (Vec::new(), Vec::new());
+    let mut lanes = (0..columns.lane_count()).map(|_| Vec::new()).collect::<Vec<_>>();
+    let margin = page.width * if columns.lane_count() == 2 { 0.08 } else { 0.025 };
     for block in blocks {
         let bounds = block.bounds;
-        let crosses_gutter = bounds.left < split - page.width * 0.08 && bounds.right > split + page.width * 0.08;
-        if block.kind == BlockKind::Title || bounds.top < front_end || crosses_gutter {
-            ordered.append(&mut left);
-            ordered.append(&mut right);
-            ordered.push(block);
-        } else if bounds.center() < split {
-            left.push(block);
+        let lane = columns.lane_with_margin(bounds, margin)
+            .filter(|_| block.kind != BlockKind::Title && bounds.top >= front_end);
+        if let Some(lane) = lane {
+            lanes[lane].push(block);
         } else {
-            right.push(block);
+            for lane in &mut lanes {
+                ordered.append(lane);
+            }
+            ordered.push(block);
         }
     }
-    ordered.append(&mut left);
-    ordered.append(&mut right);
+    ordered.extend(lanes.into_iter().flatten());
     ordered
 }
 
@@ -1403,7 +1562,7 @@ struct Asset {
     caption: Option<Bounds>,
 }
 
-fn add_assets(page: &Page, blocks: &mut Vec<Block>, split: Option<f32>, images: Option<&Vec<Bounds>>) -> Vec<Asset> {
+fn add_assets(page: &Page, blocks: &mut Vec<Block>, columns: &PageColumns, images: Option<&Vec<Bounds>>) -> Vec<Asset> {
     join_detached_caption_titles(blocks);
     let mut rasters: Vec<Bounds> = Vec::new();
     for &bounds in images.into_iter().flatten() {
@@ -1428,9 +1587,9 @@ fn add_assets(page: &Page, blocks: &mut Vec<Block>, split: Option<f32>, images: 
         let Some(is_figure) = caption_type(&caption.text) else { continue; };
         let mark = caption.bounds;
         let region = if is_figure {
-            vector_figure(page, blocks, mark, split)
+            vector_figure(page, blocks, mark, columns)
         } else {
-            table_region(page, mark, split, &assets)
+            table_region(page, mark, columns, &assets)
         };
         let mut raster_bounds: Option<Bounds> = None;
         for (index, &raster) in rasters.iter().enumerate() {
@@ -1445,6 +1604,10 @@ fn add_assets(page: &Page, blocks: &mut Vec<Block>, split: Option<f32>, images: 
             }
         }
         let bounds = match (region, raster_bounds) {
+            // A wide raster directly above the caption describes the figure more precisely
+            // than the space inferred from surrounding text.
+            (Some(region), Some(raster)) if is_figure && raster.width() >= region.width() * 0.82
+                && (-3.0..=24.0).contains(&(mark.top - raster.bottom)) => raster,
             (Some(region), Some(raster)) => region.union(raster),
             (Some(bounds), None) | (None, Some(bounds)) => bounds,
             (None, None) => continue,
@@ -1526,27 +1689,34 @@ fn link_asset_captions(blocks: &[Block], assets: &HashMap<usize, Vec<Asset>>) ->
     links
 }
 
-fn asset_columns(page: &Page, caption: Bounds, split: Option<f32>) -> (f32, f32) {
+fn asset_columns(page: &Page, caption: Bounds, columns: &PageColumns) -> (f32, f32) {
     let margin = page.width * 0.065;
-    match split {
-        Some(split) if caption.right <= split + 8.0 => (margin, split - 4.0),
-        Some(split) if caption.left >= split - 8.0 => (split + 4.0, page.width - margin),
-        _ => (margin, page.width - margin),
-    }
+    let Some(lane) = columns.lane_with_margin(caption, 8.0) else { return (margin, page.width - margin); };
+    let left = lane.checked_sub(1).and_then(|index| columns.gutters.get(index)).map_or(margin, |gutter| gutter + 4.0);
+    let right = columns.gutters.get(lane).map_or(page.width - margin, |gutter| gutter - 4.0);
+    (left, right)
 }
 
-fn vector_figure(page: &Page, blocks: &[Block], caption: Bounds, split: Option<f32>) -> Option<Bounds> {
-    let (left, right) = asset_columns(page, caption, split);
+fn vector_figure(page: &Page, blocks: &[Block], caption: Bounds, columns: &PageColumns) -> Option<Bounds> {
+    let (left, right) = asset_columns(page, caption, columns);
     let bottom = caption.top - 2.0;
     let column = Bounds { left, top: 0.0, right, bottom };
+    let text_width = if columns.lane_with_margin(caption, 8.0).is_none() {
+        column.width() / columns.lane_count() as f32
+    } else {
+        column.width()
+    };
     let above = blocks.iter().filter(|block| {
         let bounds = block.bounds;
-        bounds.bottom <= bottom + 2.0 && bounds.overlap_x(column) > column.width() * 0.25
-            && (block.kind == BlockKind::Caption || block.kind == BlockKind::Heading
-                || matches!(block.kind, BlockKind::Title | BlockKind::Author)
-                || (block.kind == BlockKind::Paragraph && bounds.overlap_x(column) > column.width() * 0.72
-                    && block.text.chars().count() > 58 && block.text.split_whitespace().count() > 9
-                    && prose_word_ratio(&block.text) > 0.58))
+        let overlap = bounds.overlap_x(column);
+        bounds.bottom <= bottom + 2.0 && match block.kind {
+            BlockKind::Caption | BlockKind::Heading | BlockKind::Title | BlockKind::Author => {
+                overlap > column.width() * 0.25
+            }
+            BlockKind::Paragraph => overlap > text_width * 0.72 && block.text.chars().count() > 58
+                && block.text.split_whitespace().count() > 9 && prose_word_ratio(&block.text) > 0.58,
+            _ => false,
+        }
     }).map(|block| block.bounds.bottom).max_by(f32::total_cmp);
     let page_origin = (page.height * 0.06).max(bottom - page.height * 0.61);
     let top = above.map_or(page_origin, |y| y + 6.0).max(page_origin);
@@ -1560,8 +1730,8 @@ struct TableRow {
     boundary: bool,
 }
 
-fn table_region(page: &Page, caption: Bounds, split: Option<f32>, assets: &[Asset]) -> Option<Bounds> {
-    let (left, right) = asset_columns(page, caption, split);
+fn table_region(page: &Page, caption: Bounds, columns: &PageColumns, assets: &[Asset]) -> Option<Bounds> {
+    let (left, right) = asset_columns(page, caption, columns);
     let column = Bounds { left, top: 0.0, right, bottom: page.height };
     let search_height = page.height * 0.48;
     let mut lines: Vec<_> = page.groups.iter().flatten().filter(|line| {
@@ -1574,12 +1744,13 @@ fn table_region(page: &Page, caption: Bounds, split: Option<f32>, assets: &[Asse
     let mut rows: Vec<TableRow> = Vec::new();
     for line in lines {
         let bounds = line.bounds;
-        // A full-width caption can sit beside two prose columns whose left edges repeat like a grid.
-        let prose_column = split.is_some_and(|split| {
-            column.width() > page.width * 0.7 && bounds.width() > page.width * 0.26
-                && (bounds.left < page.width * 0.17 || (bounds.left - split).abs() < page.width * 0.045)
-                && line.text.split_whitespace().count() >= 6 && prose_word_ratio(&line.text) > 0.60
-        });
+        // A full-width caption can sit beside prose columns whose left edges repeat like a grid.
+        let prose_column = columns.lane(bounds).is_some_and(|lane| {
+            columns.lane_count() > 1 && column.width() > page.width * 0.7
+                && bounds.width() > page.width * if columns.lane_count() == 2 { 0.26 } else { 0.17 }
+                && if lane == 0 { bounds.left < page.width * 0.17 }
+                    else { (bounds.left - columns.gutters[lane - 1]).abs() < page.width * 0.045 }
+        }) && line.text.split_whitespace().count() >= 6 && prose_word_ratio(&line.text) > 0.60;
         let prose = line.cell_breaks.is_empty() && (prose_column || bounds.width() > column.width() * 0.65
             && line.text.split_whitespace().count() >= 12);
         let boundary = caption_type(&line.text).is_some() || known_heading(&line.text) || prose;
@@ -1676,6 +1847,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restores_a_detached_drop_cap_without_moving_body_lines() {
+        let layout = concat!(
+            "header\n",
+            "1\t1\t0\t0\t0\t0\t0\t0\t684\t864\t-1\t###PAGE###\n",
+            "3\t1\t0\t0\t0\t0\t78\t504\t38\t95\t-1\t###FLOW###\n",
+            "4\t1\t0\t0\t0\t0\t78\t504\t38\t95\t-1\t###LINE###\n",
+            "5\t1\t0\t0\t0\t0\t78\t504\t38\t95\t100\tT\n",
+            "3\t1\t0\t0\t0\t0\t120\t522\t220\t31\t-1\t###FLOW###\n",
+            "4\t1\t0\t0\t0\t0\t120\t522\t220\t16\t-1\t###LINE###\n",
+            "5\t1\t0\t0\t0\t0\t120\t522\t11\t16\t100\the\n",
+            "5\t1\t0\t0\t0\t1\t134\t522\t45\t16\t100\temergent\n",
+            "5\t1\t0\t0\t0\t2\t183\t522\t49\t16\t100\tnetworks\n",
+            "4\t1\t0\t0\t1\t0\t120\t537\t154\t16\t-1\t###LINE###\n",
+            "5\t1\t0\t0\t1\t0\t120\t537\t154\t16\t100\tcontinue across several regions.\n",
+            "3\t1\t1\t0\t0\t0\t98\t522\t17\t16\t-1\t###FLOW###\n",
+            "4\t1\t1\t0\t0\t0\t98\t522\t17\t16\t-1\t###LINE###\n",
+            "5\t1\t1\t0\t0\t0\t98\t522\t17\t16\t100\tA\n",
+        );
+        let pages = parse_layout(layout.as_bytes()).unwrap();
+        let groups = &pages[0].groups;
+        assert_eq!(groups.len(), 2);
+        let first = &groups[0][0];
+        assert_eq!(first.text, "The emergent networks");
+        assert_eq!(first.bounds, Bounds::from_size(120.0, 522.0, 220.0, 16.0));
+        assert_eq!(first.font_height(), 16.0);
+        assert_eq!(&first.text[first.words[0].text.clone()], "The");
+        assert_eq!(&first.text[first.words[1].text.clone()], "emergent");
+        assert_eq!(groups[1][0].text, "A");
+    }
+
+    #[test]
     fn reconstructs_the_aligned_numbered_assignments_as_one_display() {
         let line = |left, number, value: &str| {
             let text = format!("C {number} = {value}");
@@ -1754,23 +1956,46 @@ mod tests {
     #[test]
     fn preserves_unfinished_sentences_at_column_and_page_breaks() {
         let location = |page, column, left, top| ParagraphLocation {
-            page, page_height: 840.0, column,
+            page, page_height: 840.0, column: Some(column), column_count: 2,
             bounds: Bounds::from_size(left, top, 251.0, 9.0), first_line_indent: 0.0,
         };
         let block = |position: ParagraphLocation, text: &str| Block {
             kind: BlockKind::Paragraph, page: position.page, text: text.into(), bounds: position.bounds,
         };
-        let left = location(2, TextColumn::Left, 38.0, 754.0);
-        let right = location(2, TextColumn::Right, 307.0, 84.0);
-        let next_page = location(3, TextColumn::Left, 38.0, 84.0);
+        let left = location(2, 0, 38.0, 754.0);
+        let right = location(2, 1, 307.0, 84.0);
+        let next_page = location(3, 0, 38.0, 84.0);
         let start = block(left, "However, sandboxing alone cannot solve");
         let continued = block(right, "the problem described above.");
         assert!(paragraph_continues(&start, &continued, left, right, 9.0));
         assert!(!paragraph_continues(&block(left, "The sandbox is limited."), &continued, left, right, 9.0));
         assert!(!paragraph_continues(&start, &block(right, "Fourth, consider the next example."), left, right, 9.0));
         assert!(!paragraph_continues(&start, &continued, left, ParagraphLocation { first_line_indent: 9.0, ..right }, 9.0));
-        let right_bottom = location(2, TextColumn::Right, 307.0, 754.0);
+        let right_bottom = location(2, 1, 307.0, 754.0);
         assert!(paragraph_continues(&block(right_bottom, "The argument continues"),
             &block(next_page, "on the next page."), right_bottom, next_page, 9.0));
+    }
+
+    #[test]
+    fn connects_a_spanning_paragraph_to_a_lower_three_column_section() {
+        let location = |column, left, top, width, height| ParagraphLocation {
+            page: 1, page_height: 864.0, column, column_count: 3,
+            bounds: Bounds::from_size(left, top, width, height), first_line_indent: 0.0,
+        };
+        let block = |position: ParagraphLocation, text: &str| Block {
+            kind: BlockKind::Paragraph, page: position.page, text: text.into(), bounds: position.bounds,
+        };
+        let full = location(None, 78.0, 522.0, 514.0, 151.0);
+        let left = location(Some(0), 78.0, 679.0, 161.0, 97.0);
+        let middle = location(Some(1), 259.0, 679.0, 159.0, 97.0);
+        let right = location(Some(2), 440.0, 679.0, 166.0, 97.0);
+        let start = block(full, "The sample text continues across");
+        let first = block(left, "the first column, then wraps");
+        let second = block(middle, "to the second column.");
+        assert!(paragraph_continues(&start, &first, full, left, 12.5));
+        assert!(paragraph_continues(&first, &second, left, middle, 12.5));
+        assert!(!paragraph_continues(&start, &second, full, middle, 12.5));
+        assert!(!paragraph_continues(&first, &block(right, "into the last column."), left, right, 12.5));
+        assert!(!paragraph_continues(&second, &block(right, "A separate paragraph starts here."), middle, right, 12.5));
     }
 }
