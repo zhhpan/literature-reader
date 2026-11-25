@@ -18,6 +18,8 @@ AppVersion={#AppVersion}
 AppPublisher=Literature Reader contributors
 VersionInfoVersion={#AppVersion}
 DefaultDirName={localappdata}\Programs\Literature Reader
+UsePreviousAppDir=yes
+DisableDirPage=no
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -97,6 +99,11 @@ var
 function IsReaderUpdate: Boolean;
 begin
   Result := ExpandConstant('{param:READERUPDATE|0}') = '1';
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = wpSelectDir) and IsReaderUpdate;
 end;
 
 function NeedsNodeRuntime: Boolean;
