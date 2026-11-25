@@ -16,6 +16,7 @@ use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWN
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO: &str = "zhhpan/literature-reader";
+const MANIFEST_FILE: &str = "reader-update.json";
 const ASSET_PREFIX: &str = "LiteratureReader-Setup-";
 const ASSET_SUFFIX: &str = "-x64.exe";
 const MAX_RELEASE_JSON: u64 = 1024 * 1024;
@@ -56,19 +57,89 @@ struct Asset {
 pub fn check() -> Result<Option<Release>, String> {
     let current = version(CURRENT_VERSION).expect("package version is numeric");
     remove_old_downloads(current);
-    let url = Url::parse(&format!("https://api.github.com/repos/{REPO}/releases/latest")).unwrap();
-    let response = http::get(&url, true).map_err(|error| format!("无法连接 GitHub：{error}"))?;
-    if response.status != 200 {
-        return Err(format!("GitHub 返回 HTTP {}，请稍后重试。", response.status));
+    let manifest_error = match latest_manifest() {
+        Ok(Some(info)) => match newer_release(info, current) {
+            Ok(release) => return Ok(release),
+            Err(error) => Some(error),
+        },
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+    latest_api(current).map_err(|error| match manifest_error {
+        Some(manifest) => format!("更新清单读取失败。{manifest} {error}"),
+        None => error,
+    })
+}
+
+fn latest_manifest() -> Result<Option<ReleaseInfo>, String> {
+    let mut url = Url::parse(&format!("https://github.com/{REPO}/releases/latest/download/{MANIFEST_FILE}")).unwrap();
+    let mut expected_tag: Option<String> = None;
+    for _ in 0..=3 {
+        let response = http::get(&url, false).map_err(|error| format!("无法读取 GitHub 更新清单：{error}"))?;
+        match response.status {
+            200 => {
+                let info = read_release(response)?;
+                if info.draft || info.prerelease || expected_tag.as_ref().is_some_and(|tag| tag != &info.tag_name) {
+                    return Err("更新清单与 GitHub 正式版本不符。".into());
+                }
+                return Ok(Some(info));
+            }
+            404 => return Ok(None),
+            301 | 302 | 303 | 307 | 308 => {
+                let next = response.location.as_deref().and_then(|location| url.join(location).ok())
+                    .ok_or_else(|| "GitHub 返回了无法确认的更新清单地址。".to_owned())?;
+                if let Some(tag) = manifest_release_tag(&next) {
+                    if expected_tag.as_deref().is_some_and(|expected| expected != tag) {
+                        return Err("GitHub 更新清单重定向到了不同版本。".into());
+                    }
+                    expected_tag = Some(tag.to_owned());
+                } else if !allowed_asset_redirect(&next) {
+                    return Err("GitHub 返回了无法确认的更新清单地址。".into());
+                }
+                url = next;
+            }
+            status => return Err(format!("GitHub 更新清单返回 HTTP {status}。")),
+        }
     }
+    Err("GitHub 更新清单重定向次数过多。".into())
+}
+
+fn manifest_release_tag(url: &Url) -> Option<&str> {
+    if !safe_download_url(url) || url.host_str() != Some("github.com") || url.query().is_some() {
+        return None;
+    }
+    let release_path = url.path().strip_prefix('/')?.strip_prefix(REPO)?.strip_prefix("/releases/download/")?;
+    let (tag, name) = release_path.split_once('/')?;
+    (name == MANIFEST_FILE && version(tag.strip_prefix('v')?).is_some()).then_some(tag)
+}
+
+fn latest_api(current: [u32; 3]) -> Result<Option<Release>, String> {
+    let url = Url::parse(&format!("https://api.github.com/repos/{REPO}/releases/latest")).unwrap();
+    let response = http::get(&url, true).map_err(|error| format!("无法连接 GitHub API：{error}"))?;
+    if response.status != 200 {
+        let limited = response.status == 429 || response.status == 403 && (
+            response.header("x-ratelimit-remaining").is_some_and(|value| value.trim() == "0")
+                || response.header("retry-after").is_some()
+        );
+        if limited {
+            return Err(format!("GitHub API 已限流（HTTP {}）。请稍后重试，或从 GitHub 发布页下载安装包。", response.status));
+        }
+        if response.status == 403 {
+            return Err("GitHub API 拒绝访问（HTTP 403）。可检查网络或代理，也可在浏览器访问 GitHub 发布页。".into());
+        }
+        return Err(format!("GitHub API 返回 HTTP {}，请稍后重试。", response.status));
+    }
+    newer_release(read_release(response)?, current)
+}
+
+fn read_release(response: http::Response) -> Result<ReleaseInfo, String> {
     let mut buffer = Vec::new();
     response.take(MAX_RELEASE_JSON + 1).read_to_end(&mut buffer)
         .map_err(|error| format!("无法读取 GitHub 发布信息：{error}"))?;
     if buffer.len() as u64 > MAX_RELEASE_JSON {
         return Err("GitHub 返回的发布信息过长。".into());
     }
-    let info = serde_json::from_slice(&buffer).map_err(|_| "无法解析 GitHub 发布信息。".to_owned())?;
-    newer_release(info, current)
+    serde_json::from_slice(&buffer).map_err(|_| "无法解析 GitHub 发布信息。".to_owned())
 }
 
 fn newer_release(info: ReleaseInfo, current: [u32; 3]) -> Result<Option<Release>, String> {
@@ -146,8 +217,12 @@ fn asset_response(url: &Url) -> Result<http::Response, String> {
 }
 
 fn allowed_asset_redirect(url: &Url) -> bool {
+    safe_download_url(url) && url.host_str() == Some("release-assets.githubusercontent.com")
+}
+
+fn safe_download_url(url: &Url) -> bool {
     url.scheme() == "https" && url.port().is_none() && url.username().is_empty() && url.password().is_none()
-        && url.fragment().is_none() && matches!(url.host_str(), Some("release-assets.githubusercontent.com"))
+        && url.fragment().is_none()
 }
 
 pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result<VerifiedInstaller, String> {
@@ -299,6 +374,20 @@ mod tests {
         assert!(!allowed("https://release-assets.githubusercontent.com.example.com/a"));
         assert!(!allowed("http://release-assets.githubusercontent.com/a"));
         assert!(!allowed("https://name@release-assets.githubusercontent.com/a"));
+    }
+
+    #[test]
+    fn accepts_only_our_versioned_manifest_redirect() {
+        let url = |path: &str| Url::parse(&format!("https://github.com/{path}")).unwrap();
+        assert_eq!(manifest_release_tag(&url(&format!("{REPO}/releases/download/v0.1.10/{MANIFEST_FILE}"))), Some("v0.1.10"));
+        for path in [
+            format!("other/repo/releases/download/v0.1.10/{MANIFEST_FILE}"),
+            format!("{REPO}/releases/download/v0.1.10-rc/{MANIFEST_FILE}"),
+            format!("{REPO}/releases/download/v0.1.10/{MANIFEST_FILE}?other=yes"),
+            format!("{REPO}/releases/download/v0.1.10/extra/{MANIFEST_FILE}"),
+        ] {
+            assert!(manifest_release_tag(&url(&path)).is_none());
+        }
     }
 
     #[test]

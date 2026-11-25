@@ -5,7 +5,7 @@ use url::{Position, Url};
 use windows_sys::Win32::Foundation::{BOOL, ERROR_INSUFFICIENT_BUFFER};
 use windows_sys::Win32::Networking::WinHttp::{
     ERROR_WINHTTP_HEADER_NOT_FOUND, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_DISABLE_AUTHENTICATION,
-    WINHTTP_DISABLE_COOKIES, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_ESCAPE_DISABLE,
+    WINHTTP_DISABLE_COOKIES, WINHTTP_DISABLE_REDIRECTS, WINHTTP_FLAG_ESCAPE_DISABLE, WINHTTP_QUERY_CUSTOM,
     WINHTTP_FLAG_SECURE, WINHTTP_OPTION_DISABLE_FEATURE, WINHTTP_QUERY_FLAG_NUMBER,
     WINHTTP_QUERY_LOCATION, WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen,
     WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
@@ -19,6 +19,13 @@ pub(super) struct Response {
     request: Handle,
     _connection: Handle,
     _session: Handle,
+}
+
+impl Response {
+    pub(super) fn header(&self, name: &str) -> Option<String> {
+        let name = wide(name);
+        text_header(&self.request, WINHTTP_QUERY_CUSTOM, name.as_ptr()).ok().flatten()
+    }
 }
 
 pub(super) fn get(url: &Url, github_json: bool) -> io::Result<Response> {
@@ -51,7 +58,7 @@ pub(super) fn get(url: &Url, github_json: bool) -> io::Result<Response> {
         check(WinHttpQueryHeaders(request.0, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             null(), (&raw mut status).cast(), &mut size, null_mut()))?;
         let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
-            redirect_location(&request)?
+            text_header(&request, WINHTTP_QUERY_LOCATION, null())?
         } else {
             None
         };
@@ -59,25 +66,25 @@ pub(super) fn get(url: &Url, github_json: bool) -> io::Result<Response> {
     }
 }
 
-fn redirect_location(request: &Handle) -> io::Result<Option<String>> {
-    const MAX_LOCATION_BYTES: u32 = 16 * 1024;
+fn text_header(request: &Handle, field: u32, name: *const u16) -> io::Result<Option<String>> {
+    const MAX_HEADER_BYTES: u32 = 16 * 1024;
     let mut bytes = 0;
     unsafe {
-        if WinHttpQueryHeaders(request.0, WINHTTP_QUERY_LOCATION, null(), null_mut(), &mut bytes, null_mut()) != 0 {
+        if WinHttpQueryHeaders(request.0, field, name, null_mut(), &mut bytes, null_mut()) != 0 {
             return Ok(None);
         }
         let error = io::Error::last_os_error();
         match error.raw_os_error().map(|code| code as u32) {
             Some(ERROR_WINHTTP_HEADER_NOT_FOUND) => return Ok(None),
-            Some(ERROR_INSUFFICIENT_BUFFER) if bytes <= MAX_LOCATION_BYTES => {}
+            Some(ERROR_INSUFFICIENT_BUFFER) if bytes <= MAX_HEADER_BYTES => {}
             _ => return Err(error),
         }
         let mut data = vec![0u16; bytes.div_ceil(2) as usize];
-        check(WinHttpQueryHeaders(request.0, WINHTTP_QUERY_LOCATION, null(), data.as_mut_ptr().cast(),
+        check(WinHttpQueryHeaders(request.0, field, name, data.as_mut_ptr().cast(),
             &mut bytes, null_mut()))?;
         data.truncate(bytes as usize / 2);
-        let location = String::from_utf16(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        Ok(Some(location))
+        let text = String::from_utf16(&data).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(Some(text))
     }
 }
 

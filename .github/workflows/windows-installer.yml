@@ -153,6 +153,24 @@ jobs:
               throw 'Release tag does not point to the built commit.'
           }
 
+          $manifestName = 'reader-update.json'
+          $manifestPath = Join-Path $installer.DirectoryName $manifestName
+          $manifest = [ordered]@{
+              tag_name = $tag
+              draft = $false
+              prerelease = $false
+              assets = @([ordered]@{
+                  name = $env:INSTALLER_NAME
+                  state = 'uploaded'
+                  size = $installer.Length
+                  browser_download_url = "https://github.com/$repo/releases/download/$tag/$env:INSTALLER_NAME"
+                  digest = "sha256:$env:INSTALLER_SHA256"
+              })
+          } | ConvertTo-Json -Depth 4 -Compress
+          [IO.File]::WriteAllText($manifestPath, $manifest)
+          $manifestFile = Get-Item -LiteralPath $manifestPath
+          $manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
           function Get-Release {
               $data = gh api --paginate "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == `"$tag`")"
               if ($LASTEXITCODE -ne 0) { throw 'Could not read releases from GitHub.' }
@@ -161,15 +179,19 @@ jobs:
 
           $release = Get-Release
           if (!$release) {
-              gh release create $tag $installer.FullName --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
+              gh release create $tag $installer.FullName $manifestPath --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               $release = Get-Release
           }
           $assets = @($release.assets)
-          if ($assets.Count -ne 1 -or $assets[0].name -cne $env:INSTALLER_NAME -or
-              $assets[0].state -ne 'uploaded' -or $assets[0].size -ne $installer.Length -or
-              $assets[0].digest -ne "sha256:$env:INSTALLER_SHA256") {
-              throw "Release $tag must contain only the verified installer. Inspect the existing release before trying again."
+          $installerAsset = @($assets | Where-Object name -CEQ $env:INSTALLER_NAME)
+          $manifestAsset = @($assets | Where-Object name -CEQ $manifestName)
+          if ($assets.Count -ne 2 -or $installerAsset.Count -ne 1 -or $manifestAsset.Count -ne 1 -or
+              $installerAsset.state -ne 'uploaded' -or $installerAsset.size -ne $installer.Length -or
+              $installerAsset.digest -ne "sha256:$env:INSTALLER_SHA256" -or
+              $manifestAsset.state -ne 'uploaded' -or $manifestAsset.size -ne $manifestFile.Length -or
+              $manifestAsset.digest -ne "sha256:$manifestDigest") {
+              throw "Release $tag must contain the verified installer and update manifest. Inspect the existing release before trying again."
           }
           if ($release.draft) {
               $published = gh api --method PATCH "repos/$repo/releases/$($release.id)" -F draft=false -f make_latest=legacy

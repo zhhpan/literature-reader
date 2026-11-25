@@ -15,6 +15,7 @@ pub fn run() {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
+            hIcon: LoadIconW(instance, APP_ICON_RESOURCE),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             lpszClassName: class.as_ptr(),
             ..zeroed()

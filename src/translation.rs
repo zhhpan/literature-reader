@@ -22,6 +22,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 
 const MAX_BATCH_CHARACTERS: usize = 3_000;
+const MAX_BATCH_PARAGRAPHS: usize = 12;
 const MAX_BRIDGE_EVENT_BYTES: u64 = 1024 * 1024;
 const RULES: &str = concat!(
     "Translate the supplied source text into Simplified Chinese for an academic paper. ",
@@ -45,11 +46,13 @@ pub enum TranslationStyle {
     Bibliography,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Model {
     pub id: String,
     pub display_name: String,
     pub credit_multiplier: Option<f64>,
+    #[serde(default)]
+    disable_thinking: bool,
 }
 
 #[derive(Deserialize)]
@@ -130,14 +133,14 @@ struct Translation {
 }
 
 pub struct Translator<'a> {
-    model: &'a str,
+    model: &'a Model,
     bridge: BridgeProcess,
     on_rate: Box<dyn FnMut(f64) + 'a>,
 }
 
 impl<'a> Translator<'a> {
     pub fn new(
-        model: &'a str, cancel: &AtomicBool, on_rate: impl FnMut(f64) + 'a,
+        model: &'a Model, cancel: &AtomicBool, on_rate: impl FnMut(f64) + 'a,
     ) -> Result<Self, String> {
         check_cancelled(Some(cancel))?;
         let mut bridge = BridgeProcess::spawn("translate")?;
@@ -179,8 +182,8 @@ impl<'a> Translator<'a> {
             }
             let source = Source::new(id, text, style);
             let characters = source.text().chars().count();
-            if !batch.is_empty() && size + characters > MAX_BATCH_CHARACTERS {
-                skipped += self.translate_chunk(&batch, style, cancel, &mut publish)?;
+            if !batch.is_empty() && (batch.len() >= MAX_BATCH_PARAGRAPHS || size + characters > MAX_BATCH_CHARACTERS) {
+                skipped += self.translate_chunk(&mut batch, style, cancel, &mut publish)?;
                 batch.clear();
                 size = 0;
             }
@@ -188,53 +191,30 @@ impl<'a> Translator<'a> {
             size += characters;
         }
         if !batch.is_empty() {
-            skipped += self.translate_chunk(&batch, style, cancel, &mut publish)?;
+            skipped += self.translate_chunk(&mut batch, style, cancel, &mut publish)?;
         }
         Ok(skipped)
     }
 
     fn translate_chunk(
         &mut self,
-        batch: &[Source<'_>],
+        batch: &mut Vec<Source<'_>>,
         style: TranslationStyle,
         cancel: &AtomicBool,
         publish: &mut impl FnMut(TranslationUpdate) -> Result<(), String>,
     ) -> Result<usize, String> {
-        if let [paragraph] = batch {
-            return Ok(usize::from(!self.translate_one(paragraph, style, cancel, publish)?));
-        }
-        let output = self.translate_text(batch, style, cancel, publish)?;
-        let received = parse_translation_list(&output);
-        let mut ready = Vec::new();
-        let mut missing = Vec::new();
-        for paragraph in batch {
-            match received.as_ref().and_then(|list| list.text_for(paragraph.id))
-                .and_then(|text| paragraph.restore(text)) {
-                Some(text) => ready.push((paragraph.id, text)),
-                None => missing.push(paragraph),
+        let attempts = if batch.len() == 1 { 1 } else { 2 };
+        for attempt in 0..attempts {
+            let output = self.translate_text(batch, style, cancel, attempt > 0, publish)?;
+            let ready = collect_translated_rows(batch, &output);
+            if !ready.is_empty() {
+                publish(TranslationUpdate::Ready(ready))?;
+            }
+            if batch.is_empty() {
+                break;
             }
         }
-        if !ready.is_empty() {
-            publish(TranslationUpdate::Ready(ready))?;
-        }
-        let mut skipped = 0;
-        for paragraph in missing {
-            skipped += usize::from(!self.translate_one(paragraph, style, cancel, publish)?);
-        }
-        Ok(skipped)
-    }
-
-    fn translate_one(
-        &mut self,
-        paragraph: &Source<'_>,
-        style: TranslationStyle,
-        cancel: &AtomicBool,
-        publish: &mut impl FnMut(TranslationUpdate) -> Result<(), String>,
-    ) -> Result<bool, String> {
-        let output = self.translate_text(std::slice::from_ref(paragraph), style, cancel, publish)?;
-        let Some(text) = paragraph.restore(&output) else { return Ok(false) };
-        publish(TranslationUpdate::Ready(vec![(paragraph.id, text)]))?;
-        Ok(true)
+        Ok(batch.len())
     }
 
     fn translate_text(
@@ -242,6 +222,7 @@ impl<'a> Translator<'a> {
         batch: &[Source<'_>],
         style: TranslationStyle,
         cancel: &AtomicBool,
+        fresh_session: bool,
         publish: &mut impl FnMut(TranslationUpdate) -> Result<(), String>,
     ) -> Result<String, String> {
         check_cancelled(Some(cancel))?;
@@ -263,7 +244,8 @@ impl<'a> Translator<'a> {
         };
         publish(TranslationUpdate::Preview(Vec::new()))?;
         self.bridge.send(&json!({
-            "model": self.model, "source": source, "rules": RULES, "instruction": instruction, "stream_output": true
+            "model": self.model.id, "source": source, "rules": RULES, "instruction": instruction,
+            "disable_thinking": self.model.disable_thinking, "fresh_session": fresh_session, "stream_output": true
         }))?;
         let deadline = Instant::now() + Duration::from_secs(180);
         let mut partial = Some(String::new());
@@ -299,6 +281,28 @@ impl<'a> Translator<'a> {
     }
 }
 
+fn collect_translated_rows(batch: &mut Vec<Source<'_>>, output: &str) -> Vec<(usize, TranslatedText)> {
+    let single = batch.len() == 1;
+    let received = if single {
+        None
+    } else {
+        parse_translation_list(output).or_else(|| {
+            streamed_translation_rows(output, false).map(|translations| TranslationList { translations })
+        })
+    };
+    let mut ready = Vec::new();
+    batch.retain(|paragraph| {
+        let text = if single { Some(output) } else { received.as_ref().and_then(|list| list.text_for(paragraph.id)) };
+        if let Some(translation) = text.and_then(|text| paragraph.restore(text)) {
+            ready.push((paragraph.id, translation));
+            false
+        } else {
+            true
+        }
+    });
+    ready
+}
+
 impl TranslationList {
     fn text_for(&self, id: usize) -> Option<&str> {
         let mut matches = self.translations.iter().filter(|item| item.id == id);
@@ -312,7 +316,7 @@ fn preview_rows(batch: &[Source<'_>], output: &str) -> Vec<(usize, TranslatedTex
         return paragraph.preview(output).into_iter().collect();
     }
 
-    let rows = streamed_translation_rows(output).unwrap_or_default();
+    let rows = streamed_translation_rows(output, true).unwrap_or_default();
     batch.iter().filter_map(|paragraph| {
         let mut received = rows.iter().filter(|row| row.id == paragraph.id);
         let row = received.next()?;
@@ -323,7 +327,7 @@ fn preview_rows(batch: &[Source<'_>], output: &str) -> Vec<(usize, TranslatedTex
     }).collect()
 }
 
-fn streamed_translation_rows(input: &str) -> Option<Vec<Translation>> {
+fn streamed_translation_rows(input: &str, include_partial: bool) -> Option<Vec<Translation>> {
     let input = input.trim_start();
     let input = if let Some(fence) = input.strip_prefix("```") {
         let (language, body) = fence.split_once('\n')?;
@@ -343,7 +347,7 @@ fn streamed_translation_rows(input: &str) -> Option<Vec<Translation>> {
         match reader.next()? {
             Ok(row) => rows.push(row),
             Err(error) => {
-                if error.is_eof() {
+                if include_partial && error.is_eof() {
                     rows.extend(streamed_translation_row(input));
                 }
                 break;
@@ -600,6 +604,19 @@ mod tests {
         assert_eq!(list.text_for(2), Some("第一段"));
         assert_eq!(list.text_for(7), None);
         assert_eq!(list.text_for(8), None);
+    }
+
+    #[test]
+    fn salvages_closed_rows_from_an_interrupted_reply_without_losing_formulas() {
+        let mut batch = vec![
+            Source::new(0, "First", TranslationStyle::Prose),
+            Source::new(1, "Given $x_1$", TranslationStyle::Prose),
+            Source::new(2, "Third", TranslationStyle::Prose),
+        ];
+        let output = r#"{"translations":[{"id":0,"text":"第一段"},{"id":1,"text":"缺少公式"},{"id":2,"text":"第三"#;
+        let ready = collect_translated_rows(&mut batch, output);
+        assert_eq!(ready.iter().map(|(id, row)| (*id, row.text.as_str())).collect::<Vec<_>>(), [(0, "第一段")]);
+        assert_eq!(batch.iter().map(|row| row.id).collect::<Vec<_>>(), [1, 2]);
     }
 
     #[test]

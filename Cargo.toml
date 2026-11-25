@@ -1,10 +1,13 @@
 [package]
 name = "literature-reader"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "A desktop reader for bilingual academic PDFs"
+
+[build-dependencies]
+embed-resource = "3.0"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -38,6 +38,7 @@ const ACCENT: u32 = color(23, 104, 86);
 const ACCENT_DARK: u32 = color(13, 83, 68);
 const TINT: u32 = color(233, 246, 241);
 const ERROR: u32 = color(155, 52, 40);
+const APP_ICON_RESOURCE: *const u16 = 101_usize as *const u16;
 
 const BODY: usize = 0;
 const SMALL: usize = 1;
@@ -148,6 +149,7 @@ struct View {
     pdf_view: bool,
     dpi: u32,
     fonts: [HFONT; FONT_COUNT],
+    app_icon: HICON,
     scroll: i32,
     bilingual_scroll: i32,
     original_scroll: i32,
@@ -179,6 +181,7 @@ impl View {
             pdf_view: false,
             dpi,
             fonts: make_fonts(dpi),
+            app_icon: unsafe { LoadIconW(GetModuleHandleW(null()), APP_ICON_RESOURCE) },
             scroll: 0,
             bilingual_scroll: 0,
             original_scroll: 0,
@@ -440,9 +443,7 @@ impl View {
     fn paint_toolbar(&mut self, p: &Painter, width: i32) {
         let x = self.s(22);
         p.fill(rc(0, 0, width, self.s(if self.reader.signed_in { 108 } else { 60 })), WHITE);
-        p.round(rc(x, self.s(14), x + self.s(31), self.s(45)), self.s(8), ACCENT, ACCENT);
-        p.fill(rc(x + self.s(7), self.s(23), x + self.s(14), self.s(35)), WHITE);
-        p.fill(rc(x + self.s(17), self.s(23), x + self.s(24), self.s(35)), color(164, 222, 205));
+        unsafe { DrawIconEx(p.dc, x, self.s(12), self.app_icon, self.s(36), self.s(36), 0, null_mut(), DI_NORMAL) };
         p.line_text("文献阅读器", BRAND, TEXT, rc(x + self.s(42), 0, x + self.s(155), self.s(59)), DT_LEFT);
         p.fill(rc(0, self.s(59), width, self.s(60)), LINE);
         if !self.reader.signed_in {

@@ -16,7 +16,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const IMAGE_BUDGET: usize = 48 * 1024 * 1024;
-const TRANSLATION_BATCH_BLOCKS: usize = 8;
 const OUTPUT_RATE_STALE_AFTER: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -432,9 +431,10 @@ impl Reader {
         if !self.translation_requested || self.translation.is_some() || !self.can_translate() {
             return;
         }
-        let (Some(document), Some(model), Some(pdf_id)) = (&self.document, self.model.clone(), self.pdf_id) else {
+        let (Some(document), Some(model_id), Some(pdf_id)) = (&self.document, &self.model, self.pdf_id) else {
             return;
         };
+        let Some(model) = self.models.iter().find(|model| &model.id == model_id).cloned() else { return };
         let CacheState::Ready(cache) = &self.translation_cache else { return };
         self.translation_requested = false;
         self.translation_error = None;
@@ -726,7 +726,7 @@ fn save_translations(cache: &Cache, document: &Document, rows: &[(usize, Transla
 fn translate(
     revision: u64,
     pdf_id: PdfId,
-    model: &str,
+    model: &Model,
     document: &Document,
     input: &[usize],
     cache: &Cache,
@@ -742,8 +742,7 @@ fn translate(
     let source = |index| translation_source(document, index);
     let style = |index: usize| translation_style(document.blocks[index].kind);
     let sections = remaining.chunk_by(|&left, &right| style(left) == style(right));
-    let batches = std::iter::once(first)
-        .chain(sections.flat_map(|section| section.chunks(TRANSLATION_BATCH_BLOCKS)));
+    let batches = std::iter::once(first).chain(sections);
     let mut skipped = 0;
     for batch in batches {
         if cancel.load(Ordering::Relaxed) {
@@ -779,7 +778,7 @@ fn translate(
         skipped += result?;
     }
     if skipped != 0 && !cancel.load(Ordering::Relaxed) {
-        return Err(format!("模型未完整保留公式，已保留 {skipped} 个段落的原文。"));
+        return Err(format!("有 {skipped} 个段落未返回可用译文，已保留原文。"));
     }
     Ok(())
 }
