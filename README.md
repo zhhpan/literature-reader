@@ -12,7 +12,7 @@
 
 ## 更新
 
-启动时会在后台检查 GitHub 上的正式版本，也可以从底部状态栏手动「检查更新」。从 v0.1.6 起，点「更新到」并确认一次，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装，成功后重新打开阅读器。
+启动时会在后台检查 GitHub 上的正式版本，也可以从底部状态栏手动「检查更新」。从 v0.1.7 起，点「更新到」并确认一次，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装，成功后重新打开阅读器。
 
 ## 账号登录和翻译
 
@@ -66,7 +66,7 @@ cargo build --release --locked --target x86_64-pc-windows-msvc
 
 ### GitHub Actions 打包
 
-在 GitHub 的 Actions 页面手动运行「Windows installer」可下载预览安装包。推送与 `Cargo.toml` 版本一致的标签（如 `v0.1.6`）会构建 x64 安装包，并在校验 SHA-256 后发布到 GitHub Releases。每个版本只上传一个安装包。 [工作流](.github/workflows/windows-installer.yml)
+在 GitHub 的 Actions 页面手动运行「Windows installer」可下载预览安装包。推送与 `Cargo.toml` 版本一致的标签（如 `v0.1.7`）会构建 x64 安装包，并在校验 SHA-256 后发布到 GitHub Releases。每个版本只上传一个安装包。 [工作流](.github/workflows/windows-installer.yml)
 
 ### 发布签名版
 

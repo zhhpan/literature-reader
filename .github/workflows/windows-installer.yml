@@ -95,9 +95,14 @@ jobs:
               -AppExecutable 'target\x86_64-pc-windows-msvc\release\literature-reader.exe'
           $filename = "LiteratureReader-Setup-$env:APP_VERSION-x64.exe"
           $installer = Get-Item -LiteralPath "target\release\$filename"
-          if ($installer.VersionInfo.ProductVersion -ne $env:APP_VERSION) {
-              throw 'Installer version does not match Cargo.toml.'
+          $info = $installer.VersionInfo
+          $embeddedVersion = [version]::new($info.ProductMajorPart, $info.ProductMinorPart,
+              $info.ProductBuildPart, $info.ProductPrivatePart)
+          $expectedVersion = [version]"$($env:APP_VERSION).0"
+          if ($embeddedVersion -ne $expectedVersion) {
+              throw "Installer product version $embeddedVersion does not match Cargo version $expectedVersion."
           }
+          Write-Host "Verified installer product version $embeddedVersion."
           $digest = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $commit = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
