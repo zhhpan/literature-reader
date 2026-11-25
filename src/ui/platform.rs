@@ -445,44 +445,75 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                     view.open(path.clone());
                 }
             }
-            Action::Models => {
-                let (items, ids, signing_in, anchor) = {
+            Action::Account => {
+                let (items, anchor) = {
                     let view = &*ptr;
                     let signing_in = view.reader.signing_in();
-                    let mut items = vec![(1, if signing_in { "取消登录" } else { "重新登录 CodeBuddy" }.into(), false)];
+                    let name = view.reader.account.as_ref().and_then(|account| account.display_name.as_deref())
+                        .unwrap_or("CodeBuddy");
+                    let mut items = vec![
+                        (0, format!("{name}  ·  已登录"), false),
+                        (2, "查看剩余积分  ↗".into(), false),
+                    ];
+                    if signing_in {
+                        items.push((1, "取消登录".into(), false));
+                    } else if !view.reader.checking_models && view.reader.translation.is_none() {
+                        items.push((1, "重新登录 CodeBuddy".into(), false));
+                    }
                     if signing_in && view.login_link.is_some() {
                         items.push((3, "复制登录链接".into(), false));
                     }
+                    (items, menu_anchor(view, action))
+                };
+                let selection = dropdown(hwnd, anchor, &items);
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr || !(*ptr).reader.signed_in {
+                    return;
+                }
+                match selection {
+                    1 if (*ptr).reader.signing_in() => (*ptr).cancel_login(),
+                    1 => (*ptr).start_login(),
+                    2 => open_credit_usage(hwnd),
+                    3 => copy_login_link(hwnd, ptr),
+                    _ => {}
+                }
+            }
+            Action::Models => {
+                let (items, ids, anchor) = {
+                    let view = &*ptr;
+                    let signing_in = view.reader.signing_in();
+                    let mut items = vec![
+                        (1, "剩余积分  ·  查看官方用量  ↗".into(), false),
+                        (0, String::new(), false),
+                    ];
                     let mut ids = Vec::new();
-                    if !signing_in && !view.reader.checking_models
-                        && (view.reader.signed_in || view.reader.models_error.is_some())
-                    {
-                        items.push((2, "刷新可用模型".into(), false));
-                    }
-                    if !signing_in && view.reader.signed_in {
+                    if !signing_in {
                         for model in &view.reader.models {
                             let id = ids.len() as u32 + 3;
                             let duplicate_name = view.reader.models.iter().any(|other| other.id != model.id && other.display_name == model.display_name);
-                            let label = if duplicate_name {
+                            let mut label = if duplicate_name {
                                 format!("{}  ·  {}", model.display_name, model.id)
                             } else {
                                 model.display_name.clone()
                             };
+                            if let Some(multiplier) = model.credit_multiplier {
+                                label.push_str(&format!("\t{multiplier}×"));
+                            }
                             items.push((id, label, view.reader.model.as_ref() == Some(&model.id)));
                             ids.push(model.id.clone());
                         }
+                        if !view.reader.checking_models {
+                            items.push((2, "刷新可用模型".into(), false));
+                        }
                     }
-                    (items, ids, signing_in, menu_anchor(view, action))
+                    (items, ids, menu_anchor(view, action))
                 };
                 let selection = dropdown(hwnd, anchor, &items);
-                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr || !(*ptr).reader.signed_in {
                     return;
                 }
                 match selection {
-                    1 if signing_in => (*ptr).cancel_login(),
-                    1 => (*ptr).start_login(),
+                    1 => open_credit_usage(hwnd),
                     2 => (*ptr).reader.refresh_models(),
-                    3 if signing_in => copy_login_link(hwnd, ptr),
                     id if id >= 3 => {
                         if let Some(id) = ids.get((id - 3) as usize) {
                             (*ptr).reader.select_model(id);
@@ -561,6 +592,14 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
             }
         }
         redraw(hwnd);
+    }
+}
+
+fn open_credit_usage(hwnd: HWND) {
+    let target = wide("https://www.codebuddy.cn/profile/usage");
+    let verb = wide("open");
+    if unsafe { ShellExecuteW(hwnd, verb.as_ptr(), target.as_ptr(), null(), null(), SW_SHOWNORMAL) } as isize <= 32 {
+        alert(hwnd, "无法在默认浏览器打开 CodeBuddy 积分用量入口。");
     }
 }
 
@@ -666,8 +705,13 @@ fn menu_at(hwnd: HWND, point: POINT, items: &[(u32, String, bool)]) -> u32 {
             return 0;
         }
         for (id, label, checked) in items {
+            if *id == 0 && label.is_empty() {
+                AppendMenuW(menu, MF_SEPARATOR, 0, null());
+                continue;
+            }
             let label = wide(&label.replace('&', "&&"));
-            AppendMenuW(menu, MF_STRING | if *checked { MF_CHECKED } else { 0 }, *id as usize, label.as_ptr());
+            let flags = if *id == 0 { MF_GRAYED } else if *checked { MF_CHECKED } else { 0 };
+            AppendMenuW(menu, MF_STRING | flags, *id as usize, label.as_ptr());
         }
         let selected = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
             point.x, point.y, 0, hwnd, null());

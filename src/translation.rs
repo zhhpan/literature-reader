@@ -44,10 +44,16 @@ pub enum TranslationStyle {
     Bibliography,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Deserialize)]
 pub struct Model {
     pub id: String,
     pub display_name: String,
+    pub credit_multiplier: Option<f64>,
+}
+
+#[derive(Deserialize)]
+pub struct Account {
+    pub display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -56,10 +62,10 @@ enum BridgeEvent {
     Ready,
     AuthUrl { url: String },
     LoginRequired,
-    SessionVerified,
+    SessionVerified { account: Option<Account> },
     OutputDelta { text: String },
     OutputRate { tokens_per_second: f64 },
-    Result { models: Option<Vec<Model>>, text: Option<String> },
+    Result { models: Option<Vec<Model>>, text: Option<String>, account: Option<Account> },
     Error { message: String },
 }
 
@@ -123,12 +129,12 @@ struct Translation {
 pub struct Translator<'a> {
     model: &'a str,
     bridge: BridgeProcess,
-    on_rate: Box<dyn FnMut(Option<f64>) + 'a>,
+    on_rate: Box<dyn FnMut(f64) + 'a>,
 }
 
 impl<'a> Translator<'a> {
     pub fn new(
-        model: &'a str, cancel: &AtomicBool, on_rate: impl FnMut(Option<f64>) + 'a,
+        model: &'a str, cancel: &AtomicBool, on_rate: impl FnMut(f64) + 'a,
     ) -> Result<Self, String> {
         check_cancelled(Some(cancel))?;
         let mut bridge = BridgeProcess::spawn("translate")?;
@@ -138,7 +144,7 @@ impl<'a> Translator<'a> {
         }
     }
 
-    pub fn discover_models(check_login: bool, on_verified: impl FnMut()) -> Result<Option<Vec<Model>>, String> {
+    pub fn discover_models(check_login: bool, on_verified: impl FnMut(Option<Account>)) -> Result<Option<Vec<Model>>, String> {
         let payload = json!({"check_login": check_login, "report_session": true});
         match run_bridge("models", payload, 55, None, |_| {}, on_verified)? {
             BridgeEvent::Result { models: Some(models), .. } => Ok(Some(models)),
@@ -147,8 +153,11 @@ impl<'a> Translator<'a> {
         }
     }
 
-    pub fn login(cancel: &AtomicBool, on_url: impl FnMut(String)) -> Result<(), String> {
-        run_bridge("login", json!({}), 320, Some(cancel), on_url, || {}).map(|_| ())
+    pub fn login(cancel: &AtomicBool, on_url: impl FnMut(String)) -> Result<Option<Account>, String> {
+        match run_bridge("login", json!({}), 320, Some(cancel), on_url, |_| {})? {
+            BridgeEvent::Result { account, .. } => Ok(account),
+            _ => Err("CodeBuddy 登录未完成。".into()),
+        }
     }
 
     pub fn translate_batch(
@@ -250,7 +259,6 @@ impl<'a> Translator<'a> {
             (TranslationStyle::Prose, false) => format.to_owned(),
         };
         publish(TranslationUpdate::Preview(Vec::new()))?;
-        (self.on_rate)(None);
         self.bridge.send(&json!({
             "model": self.model, "source": source, "rules": RULES, "instruction": instruction, "stream_output": true
         }))?;
@@ -259,7 +267,7 @@ impl<'a> Translator<'a> {
         let mut previous = Vec::new();
         loop {
             match self.bridge.receive(deadline, Some(cancel))? {
-                BridgeEvent::OutputRate { tokens_per_second } => (self.on_rate)(Some(tokens_per_second)),
+                BridgeEvent::OutputRate { tokens_per_second } => (self.on_rate)(tokens_per_second),
                 BridgeEvent::OutputDelta { text } => {
                     let Some(output) = &mut partial else { continue };
                     if output.len() + text.len() > MAX_BRIDGE_EVENT_BYTES as usize {
@@ -274,7 +282,6 @@ impl<'a> Translator<'a> {
                     }
                 }
                 BridgeEvent::Result { text: Some(text), .. } if !text.trim().is_empty() => {
-                    (self.on_rate)(None);
                     return Ok(text.trim().to_owned());
                 }
                 _ => return Err("CodeBuddy 没有返回可读取的译文。".into()),
@@ -425,7 +432,7 @@ fn run_bridge(
     deadline_seconds: u64,
     cancel: Option<&AtomicBool>,
     mut on_url: impl FnMut(String),
-    mut on_verified: impl FnMut(),
+    mut on_verified: impl FnMut(Option<Account>),
 ) -> Result<BridgeEvent, String> {
     check_cancelled(cancel)?;
     let mut bridge = BridgeProcess::spawn(operation)?;
@@ -437,7 +444,7 @@ fn run_bridge(
         match bridge.receive(deadline, cancel)? {
             event @ BridgeEvent::Result { .. } => return Ok(event),
             BridgeEvent::LoginRequired if operation == "models" => return Ok(BridgeEvent::LoginRequired),
-            BridgeEvent::SessionVerified if operation == "models" => on_verified(),
+            BridgeEvent::SessionVerified { account } if operation == "models" => on_verified(account),
             BridgeEvent::AuthUrl { url } if operation == "login" && !received_login_url => {
                 let url = official_login_url(&url).ok_or_else(|| "CodeBuddy 返回了无法确认的登录地址。".to_owned())?;
                 on_url(url);

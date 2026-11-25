@@ -3,7 +3,7 @@ use crate::model_settings;
 use crate::pdf::{self, BlockKind, Document};
 use crate::reading_position::{self, ReadingPosition};
 use crate::recent_documents::RecentDocuments;
-use crate::translation::{Model, TranslatedText, TranslationStyle, TranslationUpdate, Translator};
+use crate::translation::{Account, Model, TranslatedText, TranslationStyle, TranslationUpdate, Translator};
 use crate::translation_cache::{self, Cache, PdfId};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -114,12 +114,12 @@ enum Event {
     Opened(usize, Result<PreparedDocument, String>),
     Rendered(usize, ImageKey, Result<Raster, String>),
     Models(Result<Option<Vec<Model>>, String>),
-    SessionVerified,
+    SessionVerified(Option<Account>),
     LoginUrl(String),
-    LoginEnded(Result<(), String>),
+    LoginEnded(Result<Option<Account>, String>),
     CacheLoaded(u64, io::Result<(Cache, TranslationRows)>),
     CacheSaved(u64),
-    TranslationRate { revision: u64, rate: Option<f64> },
+    TranslationRate { revision: u64, rate: f64 },
     TranslationPreview { revision: u64, rows: TranslationRows },
     Translated { revision: u64, rows: TranslationRows, saved: bool },
     TranslationEnded(usize, Result<(), String>),
@@ -173,6 +173,7 @@ pub struct Reader {
     pub models_error: Option<String>,
     pub checking_models: bool,
     pub signed_in: bool,
+    pub account: Option<Account>,
     pub translations: Vec<Option<String>>,
     translation_math: Vec<Vec<Range<usize>>>,
     pub translated_count: usize,
@@ -222,7 +223,7 @@ impl Reader {
             path: None, document: None, generation: 0, page: 1, loading: false, load_error: None,
             recent_documents: RecentDocuments::load(),
             citation_links: Vec::new(), reference_links: Vec::new(),
-            models: Vec::new(), model: None, models_error: None, checking_models: false, signed_in: false,
+            models: Vec::new(), model: None, models_error: None, checking_models: false, signed_in: false, account: None,
             preferred_model: model_settings::load_model(), model_save_failed: false,
             pdf_id: None, reading_position: None,
             translation_cache: CacheState::Pending, unsaved_translations: Vec::new(),
@@ -288,8 +289,8 @@ impl Reader {
         self.models_error = None;
         let send = self.send.clone();
         thread::spawn(move || {
-            let result = Translator::discover_models(check_login, || {
-                let _ = send.send(Event::SessionVerified);
+            let result = Translator::discover_models(check_login, |account| {
+                let _ = send.send(Event::SessionVerified(account));
             });
             let _ = send.send(Event::Models(result));
         });
@@ -540,7 +541,10 @@ impl Reader {
                         Err(error) => { self.failed_images.insert(key, error); }
                     }
                 }
-                Event::SessionVerified => self.signed_in = true,
+                Event::SessionVerified(account) => {
+                    self.signed_in = true;
+                    self.account = account;
+                }
                 Event::Models(result) => {
                     self.checking_models = false;
                     match result {
@@ -554,6 +558,7 @@ impl Reader {
                         }
                         Ok(None) => {
                             self.signed_in = false;
+                            self.account = None;
                             self.models.clear();
                             self.set_model(None);
                         }
@@ -569,8 +574,9 @@ impl Reader {
                     let cancelled = self.login_cancel.take().is_some_and(|cancel| cancel.load(Ordering::Relaxed));
                     if !cancelled {
                         match result {
-                            Ok(()) => {
+                            Ok(account) => {
                                 self.signed_in = true;
+                                self.account = account;
                                 self.load_models(false);
                             }
                             Err(error) => self.models_error = Some(error),
@@ -594,7 +600,7 @@ impl Reader {
                 }
                 Event::TranslationRate { revision, rate } if revision == self.translation_layout_reset => {
                     if let Some(job) = self.translation.as_mut().filter(|job| !job.stopping()) {
-                        changed |= job.update_rate(rate);
+                        changed |= job.update_rate(Some(rate));
                     }
                     continue;
                 }

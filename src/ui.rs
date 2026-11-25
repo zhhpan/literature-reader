@@ -65,6 +65,7 @@ enum Action {
     OpenRecent(usize),
     RecentMenu,
     Models,
+    Account,
     PageMenu,
     GoTo(usize),
     Previous,
@@ -350,11 +351,7 @@ impl View {
         }
         if let Some(job) = &self.reader.translation {
             let state = if job.stopping() { "正在停止" } else { "正在翻译" };
-            let mut status = format!("{state}  ·  {} / {} 段", job.done, job.total);
-            if let Some(rate) = job.output_rate() {
-                status.push_str(&format!("  ·  输出约 {rate:.1} token/s"));
-            }
-            return (status, ACCENT);
+            return (format!("{state}  ·  {} / {} 段", job.done, job.total), ACCENT);
         }
         if self.reader.signing_in() {
             return ("请在登录窗口完成 CodeBuddy 授权…".into(), ACCENT);
@@ -455,17 +452,34 @@ impl View {
         let open_rect = rc(open_left, self.s(14), open_left + self.s(98), self.s(45));
         self.button(p, open_rect, "打开 PDF", Some(Action::Open), false);
 
-        let model_width = self.s(if width > self.s(930) { 246 } else { 180 });
-        let model_rect = rc(width - x - model_width, self.s(14), width - x, self.s(45));
+        let account = rc(width - x - self.s(34), self.s(13), width - x, self.s(47));
+        self.paint_account(p, account);
+        let model_width = self.s(if width > self.s(930) { 228 } else { 156 });
+        let model_right = account.left - self.s(12);
+        let model_rect = rc(model_right - model_width, self.s(14), model_right, self.s(45));
         let model_label = self.reader.model.as_deref()
             .map(|id| format!("{}  ▾", self.reader.model_name(id).unwrap_or(id)))
             .unwrap_or_else(|| "翻译模型  ▾".into());
         self.button(p, model_rect, &model_label, Some(Action::Models), false);
+        let mut title_right = model_rect.left - self.s(12);
+        if let Some(job) = &self.reader.translation {
+            let (label, ink) = if job.stopping() {
+                ("正在停止…".into(), MUTED)
+            } else if let Some(rate) = job.output_rate() {
+                (format!("≈ {rate:.1} token/s"), ACCENT_DARK)
+            } else {
+                ("等待模型输出…".into(), MUTED)
+            };
+            let bounds = rc(title_right - self.s(112), self.s(17), title_right, self.s(43));
+            p.round(bounds, self.s(13), TINT, LINE);
+            p.line_text(&label, SMALL, ink, bounds, DT_CENTER);
+            title_right = bounds.left - self.s(8);
+        }
         if let Some(path) = &self.reader.path {
             let file = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
             let title = self.reader.document.as_ref().map_or(file.as_ref(), |document| document.title.as_str());
             p.line_text(title, SMALL, MUTED,
-                rc(open_rect.right + self.s(16), 0, model_rect.left - self.s(16), self.s(59)), DT_LEFT);
+                rc(open_rect.right + self.s(16), 0, title_right, self.s(59)), DT_LEFT);
         }
 
         p.fill(rc(0, self.s(107), width, self.s(108)), LINE);
@@ -494,6 +508,27 @@ impl View {
             let label = if self.reader.translation_error.is_some() { "重试翻译" } else { "继续翻译" };
             self.button(p, rc(right - self.s(92), top, right, bottom), label, Some(Action::TranslateAll), false);
         }
+    }
+
+    fn paint_account(&mut self, p: &Painter, bounds: RECT) {
+        let hovered = self.hover == Some(Action::Account);
+        let border = if hovered { ACCENT } else { LINE };
+        p.round(bounds, self.s(34), TINT, border);
+        let initial = self.reader.account.as_ref()
+            .and_then(|account| account.display_name.as_deref())
+            .and_then(|name| name.chars().find(|character| character.is_alphanumeric()));
+        if let Some(initial) = initial {
+            let text: String = initial.to_uppercase().collect();
+            p.line_text(&text, MEDIUM, ACCENT_DARK, bounds, DT_CENTER);
+        } else {
+            let x = (bounds.left + bounds.right) / 2;
+            let y = bounds.top;
+            p.round(rc(x - self.s(4), y + self.s(7), x + self.s(4), y + self.s(15)), self.s(8), ACCENT, ACCENT);
+            p.round(rc(x - self.s(8), y + self.s(17), x + self.s(8), y + self.s(26)), self.s(9), ACCENT, ACCENT);
+        }
+        p.round(rc(bounds.right - self.s(10), bounds.bottom - self.s(10), bounds.right, bounds.bottom),
+            self.s(10), ACCENT, WHITE);
+        self.hits.push(Hit { rect: bounds, action: Action::Account });
     }
 
     fn paint_footer(&mut self, p: &Painter, width: i32, top: i32, bottom: i32) {

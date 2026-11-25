@@ -90,7 +90,11 @@ async function authenticate(sdk, interactive) {
       }
     },
   });
-  return Promise.race([auth.then(() => true), loginUrl]);
+  return Promise.race([auth.then(({ userinfo }) => {
+    const displayName = [userinfo?.userNickname, userinfo?.userName]
+      .find((value) => typeof value === 'string' && value.trim());
+    return displayName ? { display_name: displayName.trim() } : {};
+  }), loginUrl]);
 }
 
 function sessionOptions(cwd) {
@@ -117,18 +121,33 @@ async function models(sdk, cwd) {
   // The catalog call initializes the session without sending a model prompt.
   const session = sdk.unstable_v2_createSession(sessionOptions(cwd));
   try {
-    const catalog = await withTimeout(CATALOG_TIMEOUT, () => session.getAvailableModels());
+    const catalog = await withTimeout(CATALOG_TIMEOUT, async () => {
+      const raw = await session.getAvailableModelsRaw();
+      return Array.isArray(raw) && raw.length ? raw : session.getAvailableModels();
+    });
     if (!Array.isArray(catalog)) throw new BridgeError('无法读取 CodeBuddy 的可用模型。');
     const unique = new Map();
     for (const model of catalog) {
-      if (!validModelId(model?.modelId)) continue;
+      const id = model?.id ?? model?.modelId;
+      if (!validModelId(id)) continue;
       const label = typeof model.name === 'string' ? model.name.trim() : '';
-      unique.set(model.modelId, { id: model.modelId, display_name: label || model.modelId });
+      const multiplier = creditMultiplier(model.credits);
+      unique.set(id, {
+        id, display_name: label || id,
+        ...(multiplier === undefined ? {} : { credit_multiplier: multiplier }),
+      });
     }
     return { models: [...unique.values()] };
   } finally {
     session.close();
   }
+}
+
+function creditMultiplier(credits) {
+  if (typeof credits !== 'string') return undefined;
+  const match = /^(?:[x×]\s*)?(\d+(?:\.\d+)?)(?:\s*[x×])?(?:\s+credits?)?$/i.exec(credits.trim());
+  const multiplier = Number(match?.[1]);
+  return Number.isFinite(multiplier) ? multiplier : undefined;
 }
 
 function validModelId(value) {
@@ -146,17 +165,22 @@ function trackOutput() {
   function flush() {
     clearTimeout(flushTimer);
     flushTimer = undefined;
-    if (pending) emit({ type: 'output_delta', text: pending });
+    if (!pending) return;
+    emit({ type: 'output_delta', text: pending });
     pending = '';
+    if (rateTimer === undefined) {
+      publishRate();
+      rateTimer = setInterval(publishRate, OUTPUT_RATE_INTERVAL);
+    }
   }
 
   function publishRate() {
     const now = performance.now();
     const since = Math.max(startedAt, now - OUTPUT_RATE_WINDOW);
     samples = samples.filter((sample) => sample.at >= since);
-    // The SDK reports exact usage at the end, so estimate from visible text deltas.
+    // Text deltas carry no token counts. Use a full reporting interval for the first estimate.
     const tokens = samples.reduce((total, sample) => total + sample.tokens, 0);
-    const rate = tokens * 1_000 / Math.max(now - since, 1);
+    const rate = tokens * 1_000 / Math.max(now - since, OUTPUT_RATE_INTERVAL);
     emit({ type: 'output_rate', tokens_per_second: Math.round(rate * 10) / 10 });
     if (!samples.length) {
       clearInterval(rateTimer);
@@ -174,7 +198,6 @@ function trackOutput() {
       startedAt ??= now;
       pending += text;
       flushTimer ??= setTimeout(flush, OUTPUT_FLUSH_INTERVAL);
-      rateTimer ??= setInterval(publishRate, OUTPUT_RATE_INTERVAL);
     },
     flush,
     close() {
@@ -342,8 +365,8 @@ async function main(operation) {
   const input = operation === 'translate' ? null : await readInput();
   const sdk = await loadSdk();
   if (operation === 'login') {
-    await authenticate(sdk, true);
-    emit({ type: 'result' });
+    const account = await authenticate(sdk, true);
+    emit({ type: 'result', account });
     return;
   }
   if (operation === 'translate') {
@@ -352,12 +375,13 @@ async function main(operation) {
   }
 
   if (input.check_login) {
-    if (!await withTimeout(AUTH_CHECK_TIMEOUT, () => authenticate(sdk, false))) {
+    const account = await withTimeout(AUTH_CHECK_TIMEOUT, () => authenticate(sdk, false));
+    if (!account) {
       // The reader closes the bridge and its SDK child when it receives this event.
       emit({ type: 'login_required' });
       return;
     }
-    if (input.report_session === true) emit({ type: 'session_verified' });
+    if (input.report_session === true) emit({ type: 'session_verified', account });
   }
   const work = await mkdtemp(join(tmpdir(), 'literature-reader-'));
   let result;
