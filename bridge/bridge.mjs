@@ -212,23 +212,26 @@ function trackOutput() {
 
 async function translate(session, input, output, previousTurns, emitUsage) {
   let usage;
+  let resultRequestId;
   try {
     return await streamTranslation(session, input, output, (message) => {
+      if (message.type === 'result' && typeof message._requestId === 'string') {
+        resultRequestId = message._requestId;
+      }
       const update = message._meta?.['codebuddy.ai/turnUsage'];
       if (update?.version !== 1 || update.scope !== 'turn' || !['stage', 'snapshot'].includes(update.kind)
         || typeof update.requestId !== 'string' || !update.requestId || previousTurns.has(update.requestId)
         || (usage && usage.requestId !== update.requestId)
         || (usage?.kind === 'snapshot' && update.kind !== 'snapshot')) return;
       usage = update;
-    });
-  } finally {
-    if (usage) {
-      previousTurns.add(usage.requestId);
-      const { creditStatus, credits } = usage.total ?? {};
+      const { creditStatus, credits } = update.total ?? {};
       const amount = ['known', 'partial'].includes(creditStatus) && Number.isFinite(credits) && credits >= 0
         ? credits : null;
-      emitUsage({ type: 'translation_credits', amount, complete: usage.kind === 'snapshot' && creditStatus === 'known' && amount !== null });
-    }
+      emitUsage({ type: 'translation_credits', amount, complete: update.kind === 'snapshot' && creditStatus === 'known' && amount !== null });
+    });
+  } finally {
+    const requestId = resultRequestId || usage?.requestId;
+    if (requestId) previousTurns.add(requestId);
   }
 }
 
