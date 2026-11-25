@@ -23,8 +23,10 @@ mod math;
 mod platform;
 mod position;
 mod selection;
+mod updates;
 use position::PositionState;
 use selection::{Selection, TextPart};
+use updates::UpdateControl;
 pub use platform::run;
 
 const CANVAS: u32 = color(244, 247, 246);
@@ -70,6 +72,7 @@ enum Action {
     TranslateAll,
     Stop,
     Details,
+    Update,
     JumpCitation(usize),
     OpenSource { block: usize, link: usize },
 }
@@ -136,6 +139,7 @@ struct LayoutKey {
 
 struct View {
     reader: Reader,
+    updates: UpdateControl,
     pdf_view: bool,
     dpi: u32,
     fonts: [HFONT; FONT_COUNT],
@@ -164,6 +168,7 @@ impl View {
     fn new(dpi: u32) -> Self {
         Self {
             reader: Reader::new(),
+            updates: UpdateControl::new(),
             pdf_view: false,
             dpi,
             fonts: make_fonts(dpi),
@@ -444,8 +449,12 @@ impl View {
         if has_details {
             self.button(p, details, "详情", Some(Action::Details), false);
         }
+        let update = self.updates.button();
+        let update_right = if has_details { details.left - self.s(8) } else { right };
+        let update_bounds = rc(update_right - self.s(136), top + self.s(4), update_right, bottom - self.s(4));
+        self.button(p, update_bounds, &update.label, update.enabled.then_some(Action::Update), update.primary);
         p.line_text(&status, SMALL, ink, rc(left + self.s(15), top + 1,
-            if has_details { details.left - self.s(12) } else { right }, bottom), DT_LEFT);
+            update_bounds.left - self.s(12), bottom), DT_LEFT);
     }
 
     fn paint_empty(&mut self, p: &Painter, body: RECT) {

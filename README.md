@@ -10,6 +10,10 @@
 4. 点正文区块的引用可跳转到对应的文末条目。带 DOI 或来源网址的条目可以打开论文出处。
 5. 阅读位置会自动保存在本机。下次打开内容相同的 PDF 时，双语视图会回到上次读到的段落，原页视图会恢复到上次的页码和页内位置。
 
+## 更新
+
+启动时会在后台检查 GitHub 上的正式版本，也可以从底部状态栏手动「检查更新」。发现新版后，在应用内下载并校验安装包，点「安装更新」会保存阅读位置并打开 Windows 安装程序。升级沿用原安装目录，完成后可从安装程序重新打开阅读器。
+
 ## 账号登录和翻译
 
 阅读器使用腾讯的 CodeBuddy Agent SDK。国内 WorkBuddy 和 CodeBuddy 同账号共享积分，可选模型以 CodeBuddy 对该账号实际返回的列表为准。 [积分说明](https://www.workbuddy.cn/docs/workbuddy/Pricing)
@@ -58,3 +62,15 @@ cargo build --release --locked --target x86_64-pc-windows-msvc
 ```
 
 安装包输出到 `target\release\LiteratureReader-Setup-<版本>-x64.exe`。
+
+### 发布签名版
+
+在 Windows 当前用户的个人证书存储 `Cert:\CurrentUser\My` 中准备受信任的代码签名证书及其私钥，并使用 Windows SDK 提供的 SignTool。构建时传入证书指纹。脚本会给阅读器、安装程序和卸载器添加带时间戳的 Authenticode 签名，并校验主程序和安装包的签名。
+
+```powershell
+.\installer\build.ps1 -Compiler 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+    -AppExecutable 'target\x86_64-pc-windows-msvc\release\literature-reader.exe' `
+    -SigningCertificateThumbprint '<证书指纹>'
+```
+
+如果 SignTool 未加入 `PATH`，通过 `-SignTool` 指定 `signtool.exe` 的路径。签名让用户可以验证发布者。SmartScreen 还会评估文件和发布者声誉，新发布的签名版仍可能显示提示。 [微软的 SmartScreen 发布说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)

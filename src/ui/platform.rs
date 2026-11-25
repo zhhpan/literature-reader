@@ -69,6 +69,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             WM_CREATE => {
                 DragAcceptFiles(hwnd, 1);
                 SetTimer(hwnd, 1, 45, None);
+                let _ = (*ptr).updates.check(false);
             }
             WM_DESTROY => {
                 KillTimer(hwnd, 1);
@@ -94,11 +95,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             }
             WM_ERASEBKGND => return 1,
             WM_TIMER => {
-                let (changed, login_url) = {
+                let (changed, login_url, update_message) = {
                     let view = &mut *ptr;
-                    let changed = view.reader.poll() | view.scroll_text_selection();
+                    let (update_changed, update_message) = view.updates.poll();
+                    let changed = view.reader.poll() | view.scroll_text_selection() | update_changed;
                     view.save_reading_position_if_due();
-                    (changed, view.reader.take_login_url())
+                    (changed, view.reader.take_login_url(), update_message)
                 };
                 let opening_login = login_url.is_some();
                 if let Some(url) = login_url {
@@ -114,6 +116,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 }
                 if changed || opening_login {
                     redraw(hwnd);
+                }
+                if let Some(message) = update_message
+                    && GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View == ptr
+                {
+                    alert(hwnd, &message);
                 }
             }
             WM_PAINT => paint_window(hwnd, &mut *ptr),
@@ -482,6 +489,10 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                 messages.extend(view.reader.models_error.clone());
                 alert(hwnd, &messages.join("\r\n\r\n"));
             }
+            Action::Update => {
+                activate_update(hwnd, ptr);
+                return;
+            }
             _ => {
                 let view = &mut *ptr;
                 match action {
@@ -496,6 +507,65 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
             }
         }
         redraw(hwnd);
+    }
+}
+
+fn activate_update(hwnd: HWND, ptr: *mut View) {
+    use updates::Intent;
+
+    unsafe {
+        let message = match (*ptr).updates.intent() {
+            Some(Intent::Check) => (*ptr).updates.check(true),
+            Some(Intent::Download(version)) => {
+                let message = format!("发现新版本 {version}。下载安装包吗？");
+                if !confirm_update(hwnd, &message) || GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+                    return;
+                }
+                (*ptr).updates.download()
+            }
+            Some(Intent::Install(version)) => {
+                let mut message = format!("安装版本 {version} 需要关闭阅读器。");
+                if (*ptr).reader.translation.is_some() {
+                    message.push_str("正在进行的翻译会停止。");
+                }
+                message.push_str("现在安装吗？");
+                if !confirm_update(hwnd, &message) || GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+                    return;
+                }
+                let pending = {
+                    let view = &mut *ptr;
+                    view.flush_reading_position();
+                    view.updates.take_installer()
+                };
+                let Some((version, installer)) = pending else { return };
+                let result = crate::update::launch(&installer, hwnd);
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+                    return;
+                }
+                match result {
+                    Ok(()) => {
+                        DestroyWindow(hwnd);
+                        return;
+                    }
+                    Err(error) => {
+                        (*ptr).updates.put_installer_back(version, installer);
+                        Some(error)
+                    }
+                }
+            }
+            None => return,
+        };
+        redraw(hwnd);
+        if let Some(message) = message {
+            alert(hwnd, &message);
+        }
+    }
+}
+
+fn confirm_update(hwnd: HWND, text: &str) -> bool {
+    unsafe {
+        MessageBoxW(hwnd, wide(text).as_ptr(), wide("文献阅读器更新").as_ptr(),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES
     }
 }
 

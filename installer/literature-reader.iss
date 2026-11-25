@@ -26,8 +26,13 @@ Compression=lzma2/normal
 SolidCompression=yes
 ArchiveExtraction=full
 WizardStyle=modern
-OutputDir=..\target\release
+OutputDir={#PayloadDir}\output
 OutputBaseFilename=LiteratureReader-Setup-{#AppVersion}-x64
+#ifdef ReleaseSigning
+SignTool=readerRelease
+SignedUninstaller=yes
+SignedUninstallerDir={#PayloadDir}
+#endif
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
@@ -47,7 +52,8 @@ Name: "{autoprograms}\Literature Reader"; Filename: "{app}\literature-reader.exe
 Name: "{autodesktop}\Literature Reader"; Filename: "{app}\literature-reader.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\literature-reader.exe"; Description: "Open Literature Reader"; WorkingDir: "{app}"; Flags: postinstall skipifsilent unchecked
+Filename: "{app}\literature-reader.exe"; Description: "Reopen Literature Reader"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent; Check: IsReaderUpdate
+Filename: "{app}\literature-reader.exe"; Description: "Open Literature Reader"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent unchecked; Check: not IsReaderUpdate
 
 [Code]
 const
@@ -58,6 +64,11 @@ const
 
 var
   DownloadPage: TDownloadWizardPage;
+
+function IsReaderUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:READERUPDATE|0}') = '1';
+end;
 
 procedure InitializeWizard;
 begin
