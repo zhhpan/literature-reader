@@ -23,6 +23,8 @@ mod ui;
 mod update;
 #[cfg(target_os = "linux")]
 mod ui_wayland;
+#[cfg(target_os = "linux")]
+mod wayland_update;
 
 fn main() {
     #[cfg(windows)]

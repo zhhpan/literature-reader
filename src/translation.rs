@@ -71,6 +71,37 @@ pub struct Model {
 #[derive(Deserialize)]
 pub struct Account {
     pub display_name: Option<String>,
+    pub plan: Option<String>,
+    pub remaining_credits: Option<f64>,
+    pub avatar_image: Option<String>,
+    pub balance_error: Option<String>,
+}
+
+pub(crate) fn format_credit_balance(value: f64) -> Option<String> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    if value == 0.0 {
+        return Some("0".into());
+    }
+    let amount = format!("{value:.2}");
+    if amount == "0.00" {
+        return Some("<0.01".into());
+    }
+    let (whole, fraction) = amount.split_once('.').expect("decimal balance");
+    let mut result = String::with_capacity(amount.len() + whole.len() / 3);
+    for (index, digit) in whole.bytes().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(char::from(digit));
+    }
+    let fraction = fraction.trim_end_matches('0');
+    if !fraction.is_empty() {
+        result.push('.');
+        result.push_str(fraction);
+    }
+    Some(result)
 }
 
 #[derive(Deserialize)]
@@ -176,6 +207,14 @@ impl<'a> Translator<'a> {
         match run_bridge("login", json!({}), 320, Some(cancel), on_url, |_| {})? {
             BridgeEvent::Result { account, .. } => Ok(account),
             _ => Err("CodeBuddy 登录未完成。".into()),
+        }
+    }
+
+    pub fn account() -> Result<Option<Account>, String> {
+        match run_bridge("account", json!({}), 35, None, |_| {}, |_| {})? {
+            BridgeEvent::Result { account: Some(account), .. } => Ok(Some(account)),
+            BridgeEvent::LoginRequired => Ok(None),
+            _ => Err("CodeBuddy 暂未返回账户资料。".into()),
         }
     }
 
@@ -467,12 +506,14 @@ fn run_bridge(
     loop {
         match bridge.receive(deadline, cancel)? {
             event @ BridgeEvent::Result { .. } => return Ok(event),
-            BridgeEvent::LoginRequired if operation == "models" => return Ok(BridgeEvent::LoginRequired),
+            BridgeEvent::LoginRequired if matches!(operation, "models" | "account") => return Ok(BridgeEvent::LoginRequired),
             BridgeEvent::SessionVerified { account } if operation == "models" => on_verified(account),
-            BridgeEvent::AuthUrl { url } if operation == "login" && !received_login_url => {
-                let url = official_login_url(&url).ok_or_else(|| "CodeBuddy 返回了无法确认的登录地址。".to_owned())?;
-                on_url(url);
-                received_login_url = true;
+            BridgeEvent::AuthUrl { url } if operation == "login" => {
+                if !received_login_url {
+                    let url = official_login_url(&url).ok_or_else(|| "CodeBuddy 返回了无法确认的登录地址。".to_owned())?;
+                    on_url(url);
+                    received_login_url = true;
+                }
             }
             _ => return Err("CodeBuddy 返回了意外的操作响应。".into()),
         }
@@ -491,7 +532,7 @@ struct BridgeProcess {
 impl BridgeProcess {
     fn spawn(operation: &str) -> Result<Self, String> {
         let path = bridge_path()?;
-        let temp = (operation == "translate").then(tempfile::tempdir).transpose()
+        let temp = matches!(operation, "translate" | "account").then(tempfile::tempdir).transpose()
             .map_err(|error| format!("无法创建翻译进程的工作目录：{error}"))?;
         let cwd = temp.as_ref().map_or_else(
             || path.parent().expect("bridge script resides in a directory"),
@@ -504,6 +545,11 @@ impl BridgeProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if operation == "account" {
+            command.env_remove("NODE_OPTIONS")
+                .env_remove("NODE_TLS_REJECT_UNAUTHORIZED")
+                .env("NODE_USE_ENV_PROXY", "1");
+        }
         #[cfg(windows)]
         command.creation_flags(0x08000000);
         #[cfg(target_os = "linux")]

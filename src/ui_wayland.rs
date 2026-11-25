@@ -9,9 +9,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+mod account;
+mod updates;
+use account::AccountPanel;
+use updates::UpdateControl;
+
 const APP_ID: &str = "io.github.zhhpan.LiteratureReader";
-const RELEASES: &str = "https://github.com/zhhpan/literature-reader/releases/latest";
-const CREDITS: &str = "https://www.codebuddy.cn/profile/usage";
 
 pub fn run() -> i32 {
     gdk::set_allowed_backends("wayland");
@@ -70,6 +73,8 @@ struct App {
     next: gtk::Button,
     page: gtk::Label,
     login: gtk::Button,
+    account: AccountPanel,
+    updates: UpdateControl,
     translate: gtk::Button,
     models: gtk::DropDown,
     menu_models: RefCell<Vec<(String, String)>>,
@@ -105,11 +110,13 @@ impl App {
         let rate = gtk::Label::new(None);
         rate.add_css_class("lr-rate");
         let login = gtk::Button::with_label("登录 CodeBuddy");
+        let account = AccountPanel::new();
         toolbar.append(&open);
         toolbar.append(&title);
         toolbar.append(&rate);
         toolbar.append(&models);
         toolbar.append(&login);
+        toolbar.append(&account.button);
         root.append(&toolbar);
 
         let controls = gtk::Box::new(gtk::Orientation::Horizontal, 9);
@@ -124,7 +131,11 @@ impl App {
         let next = gtk::Button::with_label("›");
         let page = gtk::Label::new(None);
         let translate = gtk::Button::with_label("继续翻译");
-        let link = gtk::LinkButton::with_label("https://www.codebuddy.cn/", "打开官方授权页");
+        let link = gtk::LinkButton::with_label("https://www.codebuddy.cn/", "复制授权链接");
+        link.connect_activate_link(|link| {
+            WidgetExt::display(link).clipboard().set_text(&link.uri());
+            glib::Propagation::Stop
+        });
         controls.append(&recent);
         controls.append(&mode);
         controls.append(&previous);
@@ -158,20 +169,18 @@ impl App {
         status.set_hexpand(true);
         status.set_xalign(0.0);
         status.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        let credits = gtk::LinkButton::with_label(CREDITS, "查看官方用量");
         let credit_count = gtk::Label::new(None);
-        let release = gtk::LinkButton::with_label(RELEASES, "版本下载");
+        let updates = UpdateControl::new();
         footer.append(&status);
         footer.append(&credit_count);
-        footer.append(&credits);
-        footer.append(&release);
+        footer.append(&updates.button);
         root.append(&footer);
 
         install_css(&WidgetExt::display(&window));
         let app = Rc::new(Self {
             reader: RefCell::new(Reader::new()), window, stack, paper, paper_scroll, original_scroll,
             original, original_loaded: Cell::new(None), status, rate, credit_count, title, mode, previous, next, page,
-            login, translate, models, menu_models: RefCell::new(Vec::new()), syncing_model: Cell::new(false),
+            login, account, updates, translate, models, menu_models: RefCell::new(Vec::new()), syncing_model: Cell::new(false),
             recent, recent_menu, recent_paths: RefCell::new(Vec::new()), link,
             rows: RefCell::new(Vec::new()), paper_generation: Cell::new(usize::MAX), translation_revision: Cell::new(0),
             pending_position: Cell::new(None), dirty_position: Cell::new(None), chooser: RefCell::new(None),
@@ -180,6 +189,7 @@ impl App {
         if let Some(path) = path { app.open_pdf(path); }
         app.sync_widgets();
         app.window.present();
+        app.updates.check();
         glib::timeout_add_local(Duration::from_millis(65), move || {
             if !app.window.is_visible() { return glib::ControlFlow::Break }
             app.poll();
@@ -188,6 +198,10 @@ impl App {
     }
 
     fn connect(self: &Rc<Self>, open: &gtk::Button) {
+        let app = Rc::downgrade(self);
+        self.updates.button.connect_clicked(move |_| {
+            if let Some(app) = app.upgrade() { app.updates.activate(); }
+        });
         let app = Rc::downgrade(self);
         open.connect_clicked(move |_| {
             if let Some(app) = app.upgrade() { app.choose_pdf(); }
@@ -200,6 +214,28 @@ impl App {
                 if reader.signing_in() { reader.cancel_login(); } else { reader.start_login(); }
             }
             app.sync_widgets();
+        });
+        let app = Rc::downgrade(self);
+        self.account.popover.connect_show(move |_| {
+            if let Some(app) = app.upgrade() {
+                app.reader.borrow_mut().refresh_account();
+                app.sync_widgets();
+            }
+        });
+        let app = Rc::downgrade(self);
+        self.account.refresh.connect_clicked(move |_| {
+            if let Some(app) = app.upgrade() {
+                app.reader.borrow_mut().refresh_account();
+                app.sync_widgets();
+            }
+        });
+        let app = Rc::downgrade(self);
+        self.account.login.connect_clicked(move |_| {
+            if let Some(app) = app.upgrade() {
+                app.account.button.popdown();
+                app.reader.borrow_mut().start_login();
+                app.sync_widgets();
+            }
         });
         let app = Rc::downgrade(self);
         self.translate.connect_clicked(move |_| {
@@ -287,14 +323,16 @@ impl App {
     }
 
     fn poll(self: &Rc<Self>) {
+        self.updates.poll();
         let (changed, url) = {
             let mut reader = self.reader.borrow_mut();
             let changed = reader.poll();
             (changed, reader.take_login_url())
         };
-        if let Some(url) = url.as_deref() {
+        if let Some(url) = url.as_deref()
+            && gio::AppInfo::launch_default_for_uri(url, None::<&gio::AppLaunchContext>).is_err()
+        {
             self.link.set_uri(url);
-            let _ = gio::AppInfo::launch_default_for_uri(url, None::<&gio::AppLaunchContext>);
         }
         if changed || url.is_some() { self.sync_widgets(); }
         self.load_visible_images();
@@ -308,12 +346,11 @@ impl App {
     fn sync_widgets(self: &Rc<Self>) {
         let mut reader = self.reader.borrow_mut();
         let count = reader.document.as_ref().map_or(0, |document| document.pages);
-        let login = if reader.signing_in() { "取消登录" }
-            else if reader.signed_in {
-                reader.account.as_ref().and_then(|account| account.display_name.as_deref()).unwrap_or("CodeBuddy 已登录")
-            } else { "登录 CodeBuddy" };
+        let login = if reader.signing_in() { "取消登录" } else { "登录 CodeBuddy" };
         self.login.set_label(login);
+        self.login.set_visible(!reader.signed_in || reader.signing_in());
         self.login.set_sensitive(reader.signing_in() || !reader.checking_models && reader.translation.is_none());
+        self.account.sync(&reader);
         self.link.set_visible(reader.signing_in() && self.link.uri() != "https://www.codebuddy.cn/");
         if !reader.signing_in() { self.link.set_uri("https://www.codebuddy.cn/"); }
         self.recent.set_sensitive(!reader.recent_documents.entries().is_empty());
@@ -662,6 +699,11 @@ fn install_css(display: &gdk::Display) {
         .lr-translation { opacity: .79; }
         .lr-rate { border-radius: 13px; padding: 2px 9px; background: alpha(#28a687, .18); }
         .lr-welcome { font-size: 22px; font-weight: 600; }
+        .lr-account { padding: 10px; }
+        .lr-account-name { font-size: 18px; font-weight: 700; }
+        .lr-account-summary { background: alpha(#28a687, .14); border-radius: 11px; padding: 12px 14px; }
+        .lr-account-credits { font-size: 25px; font-weight: 700; }
+        .lr-account-hint { font-size: 12px; }
     "#);
     gtk::style_context_add_provider_for_display(display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
 }

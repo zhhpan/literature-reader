@@ -6,8 +6,9 @@ use crate::reading_position::{self, ReadingPosition};
 use crate::recent_documents::RecentDocuments;
 use crate::translation::{Account, Model, TranslatedText, TranslationStyle, TranslationUpdate, Translator};
 use crate::translation_cache::{self, Cache, PdfId};
+use base64::Engine as _;
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Cursor};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 
 const IMAGE_BUDGET: usize = 48 * 1024 * 1024;
 const OUTPUT_RATE_STALE_AFTER: Duration = Duration::from_secs(3);
+const ACCOUNT_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImageKey {
@@ -31,6 +33,33 @@ pub struct Raster {
 }
 
 impl Raster {
+    fn decode_avatar(encoded: &str) -> Option<Self> {
+        const EDGE: u32 = 96;
+        const MAX_BYTES: usize = 256 * 1024;
+        if encoded.len() > MAX_BYTES.div_ceil(3) * 4 {
+            return None;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        if bytes.len() > MAX_BYTES {
+            return None;
+        }
+        let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+        if !matches!(reader.format(), Some(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Gif | image::ImageFormat::WebP)) {
+            return None;
+        }
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(1024);
+        limits.max_image_height = Some(1024);
+        limits.max_alloc = Some(16 * 1024 * 1024);
+        reader.limits(limits);
+        let thumbnail = reader.decode().ok()?.resize_to_fill(EDGE, EDGE, image::imageops::FilterType::Triangle);
+        let mut bgra = thumbnail.into_rgba8().into_raw();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(Self { width: EDGE as i32, height: EDGE as i32, bgra })
+    }
+
     fn decode(ppm: &[u8]) -> Result<Self, String> {
         fn decode_ppm(ppm: &[u8]) -> Option<Raster> {
             let mut pixels = ppm;
@@ -115,6 +144,7 @@ enum Event {
     Rendered(usize, ImageKey, Result<Raster, String>),
     Models(Result<Option<Vec<Model>>, String>),
     SessionVerified(Option<Account>),
+    AccountLoaded(u64, Result<(Account, Option<Raster>), String>),
     LoginUrl(String),
     LoginEnded(Result<Option<Account>, String>),
     CacheLoaded(u64, io::Result<(Cache, TranslationRows)>),
@@ -176,6 +206,11 @@ pub struct Reader {
     pub checking_models: bool,
     pub signed_in: bool,
     pub account: Option<Account>,
+    pub account_avatar: Option<Raster>,
+    pub checking_account: bool,
+    pub account_error: Option<String>,
+    account_generation: u64,
+    account_requested_at: Option<Instant>,
     pub translations: Vec<Option<String>>,
     translation_math: Vec<Vec<Range<usize>>>,
     pub translated_count: usize,
@@ -227,6 +262,8 @@ impl Reader {
             recent_documents: RecentDocuments::load(),
             citation_links: Vec::new(), reference_links: Vec::new(),
             models: Vec::new(), model: None, models_error: None, checking_models: false, signed_in: false, account: None,
+            account_avatar: None, checking_account: false, account_error: None,
+            account_generation: 0, account_requested_at: None,
             preferred_model: model_settings::load_model(), model_save_failed: false,
             pdf_id: None, reading_position: None,
             translation_cache: CacheState::Pending, unsaved_translations: Vec::new(),
@@ -284,6 +321,37 @@ impl Reader {
 
     pub fn refresh_models(&mut self) {
         self.load_models(true);
+    }
+
+    pub fn refresh_account(&mut self) {
+        if !self.signed_in || self.signing_in() || self.checking_account
+            || self.account_requested_at.is_some_and(|at| at.elapsed() < ACCOUNT_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        self.checking_account = true;
+        self.account_requested_at = Some(Instant::now());
+        self.account_error = None;
+        let generation = self.account_generation;
+        let send = self.send.clone();
+        thread::spawn(move || {
+            let result = Translator::account().and_then(|result| {
+                let mut account = result.ok_or_else(|| "账户资料暂不可用，请重新确认 CodeBuddy 登录。".to_owned())?;
+                let avatar = account.avatar_image.take().as_deref().and_then(Raster::decode_avatar);
+                account.remaining_credits = account.remaining_credits.filter(|amount| amount.is_finite() && *amount >= 0.0);
+                Ok((account, avatar))
+            });
+            let _ = send.send(Event::AccountLoaded(generation, result));
+        });
+    }
+
+    fn reset_account(&mut self, account: Option<Account>) {
+        self.account_generation = self.account_generation.wrapping_add(1);
+        self.account = account;
+        self.account_avatar = None;
+        self.account_requested_at = None;
+        self.checking_account = false;
+        self.account_error = None;
     }
 
     fn load_models(&mut self, check_login: bool) {
@@ -555,7 +623,26 @@ impl Reader {
                 }
                 Event::SessionVerified(account) => {
                     self.signed_in = true;
-                    self.account = account;
+                    self.reset_account(account);
+                    self.refresh_account();
+                }
+                Event::AccountLoaded(generation, result) if generation == self.account_generation => {
+                    self.checking_account = false;
+                    match result {
+                        Ok((mut account, avatar)) => {
+                            self.account_error = account.balance_error.take();
+                            if let Some(previous) = self.account.take() {
+                                account.display_name = account.display_name.or(previous.display_name);
+                                if self.account_error.is_some() {
+                                    account.remaining_credits = account.remaining_credits.or(previous.remaining_credits);
+                                    account.plan = account.plan.or(previous.plan);
+                                }
+                            }
+                            self.account = Some(account);
+                            if let Some(avatar) = avatar { self.account_avatar = Some(avatar); }
+                        }
+                        Err(error) => self.account_error = Some(error),
+                    }
                 }
                 Event::Models(result) => {
                     self.checking_models = false;
@@ -570,7 +657,7 @@ impl Reader {
                         }
                         Ok(None) => {
                             self.signed_in = false;
-                            self.account = None;
+                            self.reset_account(None);
                             self.models.clear();
                             self.set_model(None);
                         }
@@ -588,8 +675,9 @@ impl Reader {
                         match result {
                             Ok(account) => {
                                 self.signed_in = true;
-                                self.account = account;
+                                self.reset_account(account);
                                 self.load_models(false);
+                                self.refresh_account();
                             }
                             Err(error) => self.models_error = Some(error),
                         }
@@ -643,6 +731,7 @@ impl Reader {
                         self.update_translation_preview(Vec::new());
                         if generation == self.generation && !stopped {
                             self.translation_error = result.err();
+                            self.refresh_account();
                         }
                     }
                 }

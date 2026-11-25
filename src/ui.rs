@@ -19,11 +19,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+mod account;
 mod math;
 mod platform;
 mod position;
 mod selection;
 mod updates;
+use account::AccountPanel;
 use position::PositionState;
 use selection::{Selection, TextPart};
 use updates::UpdateControl;
@@ -67,6 +69,8 @@ enum Action {
     RecentMenu,
     Models,
     Account,
+    AccountRefresh,
+    AccountLogin,
     PageMenu,
     GoTo(usize),
     Previous,
@@ -157,6 +161,8 @@ struct View {
     body_height: i32,
     viewport_height: i32,
     hover: Option<Action>,
+    account_open: bool,
+    account_panel: Option<AccountPanel>,
     hits: Vec<Hit>,
     copy_targets: Vec<CopyTarget>,
     layout_key: Option<LayoutKey>,
@@ -189,6 +195,8 @@ impl View {
             body_height: 0,
             viewport_height: 0,
             hover: None,
+            account_open: false,
+            account_panel: None,
             hits: Vec::new(),
             copy_targets: Vec::new(),
             layout_key: None,
@@ -225,6 +233,7 @@ impl View {
         self.translation_rows.clear();
         self.bibliography = None;
         self.hits.clear();
+        self.account_panel = None;
         self.copy_targets.clear();
         self.focused_reference = None;
         self.reader.open(path);
@@ -312,7 +321,12 @@ impl View {
     }
 
     fn hit(&self, point: POINT) -> Option<Action> {
-        self.hits.iter().find(|hit| contains(hit.rect, point) && self.can_activate(hit.action))
+        let hits = match &self.account_panel {
+            Some(panel) if self.account_panel_at(point) => &self.hits[panel.first_hit..],
+            Some(panel) => &self.hits[..panel.first_hit],
+            None => &self.hits,
+        };
+        hits.iter().find(|hit| contains(hit.rect, point) && self.can_activate(hit.action))
             .map(|hit| hit.action)
     }
 
@@ -400,6 +414,7 @@ impl View {
         }
         self.selection.begin_frame(body);
         self.hits.clear();
+        self.account_panel = None;
         self.copy_targets.clear();
         let painter = Painter { dc, fonts: self.fonts };
         painter.fill(area, CANVAS);
@@ -438,6 +453,9 @@ impl View {
         };
         unsafe { SetScrollInfo(hwnd, SB_VERT, &info, 1) };
         self.paint_footer(&painter, area.right, footer, area.bottom);
+        if self.account_open && signed_in {
+            self.paint_account_panel(&painter, area.right);
+        }
     }
 
     fn paint_toolbar(&mut self, p: &Painter, width: i32) {
@@ -509,27 +527,6 @@ impl View {
             let label = if self.reader.translation_error.is_some() { "重试翻译" } else { "继续翻译" };
             self.button(p, rc(right - self.s(92), top, right, bottom), label, Some(Action::TranslateAll), false);
         }
-    }
-
-    fn paint_account(&mut self, p: &Painter, bounds: RECT) {
-        let hovered = self.hover == Some(Action::Account);
-        let border = if hovered { ACCENT } else { LINE };
-        p.round(bounds, self.s(34), TINT, border);
-        let initial = self.reader.account.as_ref()
-            .and_then(|account| account.display_name.as_deref())
-            .and_then(|name| name.chars().find(|character| character.is_alphanumeric()));
-        if let Some(initial) = initial {
-            let text: String = initial.to_uppercase().collect();
-            p.line_text(&text, MEDIUM, ACCENT_DARK, bounds, DT_CENTER);
-        } else {
-            let x = (bounds.left + bounds.right) / 2;
-            let y = bounds.top;
-            p.round(rc(x - self.s(4), y + self.s(7), x + self.s(4), y + self.s(15)), self.s(8), ACCENT, ACCENT);
-            p.round(rc(x - self.s(8), y + self.s(17), x + self.s(8), y + self.s(26)), self.s(9), ACCENT, ACCENT);
-        }
-        p.round(rc(bounds.right - self.s(10), bounds.bottom - self.s(10), bounds.right, bounds.bottom),
-            self.s(10), ACCENT, WHITE);
-        self.hits.push(Hit { rect: bounds, action: Action::Account });
     }
 
     fn paint_footer(&mut self, p: &Painter, width: i32, top: i32, bottom: i32) {

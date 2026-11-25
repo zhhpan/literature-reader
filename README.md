@@ -14,14 +14,14 @@
 
 Windows 启动时会在后台读取 GitHub Releases 的公开更新清单，也可以从底部状态栏手动「检查更新」。较早的发布可通过 GitHub API 查询。点「更新到」并确认一次后，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装。升级时直接复用通过 SHA-256 校验的 Node.js、Poppler 和翻译 SDK，成功后重新打开阅读器。
 
-Linux x86_64 版可在 Wayland 合成器会话中直接运行。依赖 GTK 4 和 Poppler，归档内含 Node.js。下载新版归档后解压启动，阅读数据存放在 XDG 数据目录。 [Linux 使用说明](installer/linux/README.md)
+Linux x86_64 版可在 Wayland 合成器会话中直接运行。依赖 GTK 4 和 Poppler，归档内含 Node.js。两个平台共用发布版本号，应用内「检查更新」按平台识别对应的安装包。Linux 版发现更新时提供该版本的 Wayland 归档下载。解压运行新版即可继续使用 XDG 数据目录中的阅读记录。 [Linux 使用说明](installer/linux/README.md)
 
 ## 账号登录和翻译
 
 阅读器使用腾讯的 CodeBuddy Agent SDK。国内 WorkBuddy 和 CodeBuddy 同账号共享积分，可选模型以 CodeBuddy 对该账号实际返回的列表为准。 [积分说明](https://www.workbuddy.cn/docs/workbuddy/Pricing)
 
-1. 在入口点「登录 CodeBuddy」，使用国内 WorkBuddy 的同一账号完成授权。若默认浏览器支持小窗，应用会在独立登录窗口中打开官方授权页。小窗启动失败时，可以在入口复制授权链接。登录成功后，应用会刷新可用模型。
-2. 模型菜单显示 CodeBuddy 返回的积分消耗倍率。点「查看官方用量」可到 CodeBuddy 个人中心查看剩余积分。选择模型后，当前论文会自动按段翻译。阅读器会记住这次选择，重启后该模型仍可用时，打开 PDF 会自动翻译。
+1. 在入口点「登录 CodeBuddy」，使用国内 WorkBuddy 的同一账号完成授权。Windows 上支持小窗的默认浏览器会打开独立授权窗口，Linux 使用系统默认浏览器。浏览器启动失败时，可以在入口复制授权链接。登录成功后，应用会刷新可用模型。
+2. 模型菜单显示 CodeBuddy 返回的积分消耗倍率。点右上角头像可在应用内查看账号头像、剩余积分和套餐，并手动刷新。余额来自当前授权账户，服务暂未返回时会显示状态。选择模型后，当前论文会自动按段翻译。阅读器会记住这次选择，重启后该模型仍可用时，打开 PDF 会自动翻译。
 3. 译文随模型输出逐步显示。翻译时，顶部模型按钮旁显示估算的 token 输出速率，底部状态栏显示段落进度。点「继续翻译」可接着翻译尚未完成的段落。
 4. 底部的文档积分按 PDF 内容累加 CodeBuddy 每轮上报的消耗。记录保存在本机，下次打开同一 PDF 时恢复。已缓存的译文直接复用。有缺失的用量会标为部分记录，升级前的消耗无法补记。 [每轮积分字段说明](https://www.codebuddy.cn/docs/cli/stream-json-turn-usage)
 

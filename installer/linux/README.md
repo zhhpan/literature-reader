@@ -8,6 +8,8 @@ sudo apt install libgtk-4-1 poppler-utils xdg-utils fonts-noto-cjk
 
 解压后在 `literature-reader` 目录运行 `./literature-reader`。程序会使用包内 Node.js。Poppler 的 `pdftotext` 需支持 `-tsv`。请保留程序、`bridge` 和 `runtime` 的相对位置。
 
+应用内「检查更新」只匹配 Linux Wayland x86_64 压缩包。发现新版后可从该入口下载，解压后运行新版，XDG 数据目录中的阅读记录和译文仍可使用。
+
 如需加入桌面应用菜单，在解压后的目录运行以下命令。桌面会话需要能通过 `PATH` 找到 `~/.local/bin` 中的程序。
 
 ```bash

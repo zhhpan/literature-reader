@@ -1,11 +1,19 @@
+import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 const INPUT_LIMIT = 64 * 1024;
 const AUTH_TIMEOUT = 300_000;
 const AUTH_CHECK_TIMEOUT = 12_000;
+const ACCOUNT_TIMEOUT = 12_000;
+const ACCOUNT_FETCH_TIMEOUT = 6_000;
+const AVATAR_LIMIT = 256 * 1024;
+const ACCOUNT_RESPONSE_LIMIT = 128 * 1024;
+const PROVIDER_ACCOUNTS_URL = 'https://copilot.tencent.com/v2/plugin/accounts';
+const BILLING_SUMMARY_URL = 'https://www.workbuddy.cn/billing/meter/get-user-resource-summary';
 const CATALOG_TIMEOUT = 35_000;
 const TRANSLATION_TIMEOUT = 120_000;
 const SESSION_BATCH_LIMIT = 2;
@@ -21,6 +29,7 @@ const LOGIN_HOSTS = new Set([
   'www.workbuddy.cn',
   'workbuddy.cn',
 ]);
+const AVATAR_DOMAINS = ['qlogo.cn', 'qpic.cn', 'codebuddy.cn', 'workbuddy.cn'];
 
 class BridgeError extends Error {}
 
@@ -69,6 +78,7 @@ function validatedLoginUrl(value) {
 async function authenticate(sdk, interactive) {
   let requireLogin;
   let rejectUrl;
+  let reportedLoginUrl = false;
   const loginUrl = new Promise((resolve, reject) => {
     requireLogin = () => resolve(false);
     rejectUrl = reject;
@@ -77,14 +87,19 @@ async function authenticate(sdk, interactive) {
     executable: process.execPath,
     environment: 'internal',
     methodId: 'internal',
+    // The CLI reports the URL before it opens BROWSER. The reader owns the popup.
+    env: { BROWSER: join(process.execPath, 'reader-handles-login') },
     timeout: interactive ? AUTH_TIMEOUT : AUTH_CHECK_TIMEOUT,
     onAuthUrl: async (state) => {
       if (!interactive) {
         requireLogin();
         return;
       }
+      if (reportedLoginUrl) return;
       try {
-        emit({ type: 'auth_url', url: validatedLoginUrl(state.authUrl) });
+        const url = validatedLoginUrl(state.authUrl);
+        reportedLoginUrl = true;
+        emit({ type: 'auth_url', url });
       } catch (error) {
         rejectUrl(error);
       }
@@ -95,6 +110,229 @@ async function authenticate(sdk, interactive) {
       .find((value) => typeof value === 'string' && value.trim());
     return displayName ? { display_name: displayName.trim() } : {};
   }), loginUrl]);
+}
+
+// This read-only ACP method is also used by the CLI's bundled account UI.
+// Keep the login session in CodeBuddy and never send its credential fields to Rust.
+async function readProviderAccount() {
+  const cli = fileURLToPath(new URL('../cli/bin/codebuddy', import.meta.resolve('@tencent-ai/agent-sdk')));
+  const env = {
+    ...process.env,
+    DISABLE_AUTOUPDATER: '1',
+    CODEBUDDY_CREDENTIALS_IN_MEMORY: '0',
+    CODEBUDDY_DISABLE_AUTO_MEMORY: '1',
+    CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS: '1',
+  };
+  delete env.CODEBUDDY_RECORD_DIR;
+  delete env.CODEBUDDY_REPLAY_DIR;
+  const child = spawn(process.execPath, [
+    cli, '--acp', '--setting-sources', 'none', '--strict-mcp-config', '--tools', '', '--no-session-persistence',
+  ], {
+    env,
+    stdio: ['pipe', 'pipe', 'ignore'],
+    windowsHide: true,
+  });
+  const failure = new Promise((_, reject) => {
+    child.once('error', reject);
+    child.stdin.on('error', reject);
+  });
+
+  try {
+    return await withTimeout(ACCOUNT_TIMEOUT, () => Promise.race([requestProviderAccount(child), failure]));
+  } finally {
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.kill();
+  }
+}
+
+async function requestProviderAccount(child) {
+  function send(id, method, params) {
+    child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+  }
+
+  let requestId = 1;
+  send(requestId, 'initialize', { protocolVersion: 1, clientCapabilities: {} });
+  let pending = '';
+  for await (const chunk of child.stdout.setEncoding('utf8')) {
+    pending += chunk;
+    let end;
+    while ((end = pending.indexOf('\n')) !== -1) {
+      if (end > INPUT_LIMIT) throw new BridgeError('CodeBuddy 账号响应过长。');
+      const line = pending.slice(0, end).trim();
+      pending = pending.slice(end + 1);
+      if (!line.startsWith('{')) continue;
+      let response;
+      try {
+        response = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (response?.jsonrpc !== '2.0' || response.id !== requestId) continue;
+      if (response.error || !response.result || typeof response.result !== 'object') {
+        throw new BridgeError('CodeBuddy 未能返回账号信息。');
+      }
+      if (requestId === 1) {
+        if (response.result.protocolVersion !== 1) throw new BridgeError('不支持当前 CodeBuddy 账号协议。');
+        send(++requestId, '_codebuddy.ai/getUserInfo', {});
+      } else {
+        return response.result.userInfo;
+      }
+    }
+    if (pending.length > INPUT_LIMIT) throw new BridgeError('CodeBuddy 账号响应过长。');
+  }
+  throw new BridgeError('CodeBuddy 未能返回账号信息。');
+}
+
+function accountText(value) {
+  return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120) || undefined : undefined;
+}
+
+function providerAvatarUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    const allowedHost = url.hostname === 'copilot.tencent.com'
+      || AVATAR_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`));
+    if (!allowedHost || url.username || url.password || url.port) return undefined;
+    if (url.protocol === 'http:') url.protocol = 'https:';
+    if (url.protocol === 'https:') return url;
+  } catch {
+    // The provider can leave the avatar absent or send an invalid URL for old accounts.
+  }
+  return undefined;
+}
+
+async function readResponse(response, limit) {
+  if (!response.ok || !response.body) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  const stream = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    if (Number(response.headers.get('content-length')) > limit) return undefined;
+    for (;;) {
+      const { done, value } = await stream.read();
+      if (done) return Buffer.concat(chunks, size);
+      size += value.byteLength;
+      if (size > limit) return undefined;
+      chunks.push(value);
+    }
+  } finally {
+    await stream.cancel().catch(() => {});
+  }
+}
+
+async function providerAvatar(value) {
+  let url = providerAvatarUrl(value);
+  if (!url) return undefined;
+  const signal = AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT);
+  for (let hop = 0; hop <= 2; hop += 1) {
+    const response = await fetch(url, {
+      headers: { accept: 'image/png,image/jpeg,image/webp,image/gif' }, redirect: 'manual', signal,
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      await response.body?.cancel();
+      if (!location) return undefined;
+      url = providerAvatarUrl(new URL(location, url).href);
+      if (!url) return undefined;
+      continue;
+    }
+    const bytes = await readResponse(response, AVATAR_LIMIT);
+    if (!bytes) return undefined;
+    const raster = bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+      || bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))
+      || ['GIF87a', 'GIF89a'].includes(bytes.toString('ascii', 0, 6))
+      || (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP');
+    return raster ? bytes.toString('base64') : undefined;
+  }
+  return undefined;
+}
+
+function accountToken(user) {
+  const token = user.accessToken ?? user.token;
+  return typeof token === 'string' && /^[!-~]{1,8192}$/.test(token) ? token : undefined;
+}
+
+async function avatarForAccount(user) {
+  const directAvatar = await providerAvatar(user.avatarUrl).catch(() => undefined);
+  if (directAvatar) return directAvatar;
+
+  const token = accountToken(user);
+  if (!token || typeof user.userId !== 'string' || !user.userId.trim()) return undefined;
+  const response = await fetch(PROVIDER_ACCOUNTS_URL, {
+    headers: {
+      accept: 'application/json', authorization: `Bearer ${token}`, 'X-Domain': 'copilot.tencent.com',
+    },
+    redirect: 'error',
+    signal: AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT),
+  });
+  const bytes = await readResponse(response, ACCOUNT_RESPONSE_LIMIT);
+  if (!bytes) return undefined;
+  const { data } = JSON.parse(bytes.toString('utf8'));
+  if (!Array.isArray(data?.accounts)) return undefined;
+  const matchingAccounts = data.accounts.filter((account) => account
+    && String(account.uid ?? '') === user.userId
+    && String(account.enterpriseId ?? '') === String(user.enterpriseId ?? '')
+    && (!user.authType || account.type === user.authType));
+  if (matchingAccounts.length !== 1) return undefined;
+  const [account] = matchingAccounts;
+  return providerAvatar(account.avatarUrl ?? account.avatar_url);
+}
+
+async function providerBalance(user) {
+  // This endpoint is the personal resource summary used by the WorkBuddy account page.
+  if (user.enterpriseId || ['ultimate', 'exclusive'].includes(user.authType)) {
+    return { balance_error: '当前使用企业账户，个人积分接口未提供该配额。' };
+  }
+  const token = accountToken(user);
+  if (!token) {
+    return { balance_error: '当前授权未提供账户用量访问权限。' };
+  }
+  const headers = {
+    accept: 'application/json',
+    authorization: `Bearer ${token}`,
+    'content-type': 'application/json',
+    'x-client-platform': 'web',
+  };
+  if (typeof user.userId === 'string' && /^[!-~]{1,128}$/.test(user.userId)) {
+    headers['x-account-uid'] = user.userId;
+  }
+  const response = await fetch(BILLING_SUMMARY_URL, {
+    method: 'POST',
+    headers,
+    body: '{}',
+    redirect: 'error',
+    signal: AbortSignal.timeout(ACCOUNT_FETCH_TIMEOUT),
+  });
+  const bytes = await readResponse(response, ACCOUNT_RESPONSE_LIMIT);
+  if (response.status === 401 || response.status === 403) {
+    return { balance_error: '当前授权无法读取积分余额，请重新确认 CodeBuddy 登录。' };
+  }
+  if (!bytes) return { balance_error: '积分服务暂时无法返回余额，请稍后刷新。' };
+  const { data } = JSON.parse(bytes.toString('utf8'));
+  const rawCredits = data?.TotalCredits;
+  const credits = typeof rawCredits === 'string' && /^\d+(?:\.\d+)?$/.test(rawCredits)
+    ? Number(rawCredits) : rawCredits;
+  const plan = accountText(data?.SubscriptionPackageName);
+  if (!Number.isFinite(credits) || credits < 0) {
+    return { plan, balance_error: 'CodeBuddy 暂未提供该账户的余额。' };
+  }
+  return { plan, remaining_credits: credits };
+}
+
+async function accountProfile() {
+  const user = await readProviderAccount();
+  if (!user || typeof user !== 'object') return null;
+  const display_name = accountText(user.userNickname) ?? accountText(user.userName);
+  const [avatar_image, balance] = await Promise.all([
+    avatarForAccount(user).catch(() => undefined),
+    providerBalance(user).catch(() => ({ balance_error: '暂时无法连接积分服务，请稍后刷新。' })),
+  ]);
+  return { display_name, avatar_image, ...balance };
 }
 
 function sessionOptions(cwd) {
@@ -321,6 +559,7 @@ function errorMessage(operation, error) {
   if (error instanceof BridgeError) return error.message;
   if (operation === 'login') return 'CodeBuddy 登录未完成，请重试。';
   if (operation === 'models') return '无法读取 CodeBuddy 模型，请检查登录状态。';
+  if (operation === 'account') return '无法读取 CodeBuddy 账号信息，请稍后刷新。';
   return 'CodeBuddy 翻译服务返回错误。';
 }
 
@@ -398,9 +637,14 @@ async function translationWorker(sdk) {
 }
 
 async function main(operation) {
-  if (!['login', 'models', 'translate'].includes(operation)) throw new BridgeError('未知的翻译请求。');
+  if (!['login', 'models', 'translate', 'account'].includes(operation)) throw new BridgeError('未知的接入请求。');
   const input = operation === 'translate' ? null : await readInput();
   const sdk = await loadSdk();
+  if (operation === 'account') {
+    const account = await accountProfile();
+    emit(account ? { type: 'result', account } : { type: 'login_required' });
+    return;
+  }
   if (operation === 'login') {
     const account = await authenticate(sdk, true);
     emit({ type: 'result', account });

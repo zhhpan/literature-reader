@@ -103,6 +103,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                     let mut changed = view.reader.poll() | update_changed;
                     let entered_gate = was_signed_in && !view.reader.signed_in;
                     if entered_gate {
+                        changed |= view.dismiss_account();
                         changed |= view.clear_text_selection();
                     }
                     if view.reader.signed_in {
@@ -145,6 +146,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 }
             }
             WM_PAINT => paint_window(hwnd, &mut *ptr),
+            WM_ACTIVATEAPP if wparam == 0 => {
+                if (*ptr).dismiss_account() {
+                    redraw(hwnd);
+                }
+                return DefWindowProcW(hwnd, message, wparam, lparam);
+            }
             WM_SETCURSOR if (lparam & 0xffff) as u32 == HTCLIENT => {
                 let mut point: POINT = zeroed();
                 if GetCursorPos(&mut point) != 0 && ScreenToClient(hwnd, &mut point) != 0 {
@@ -153,7 +160,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                         Some(IDC_IBEAM)
                     } else if view.hit(point).is_some() {
                         Some(IDC_HAND)
-                    } else if view.reader.signed_in && view.text_at(point) {
+                    } else if view.reader.signed_in && !view.account_panel_at(point) && view.text_at(point) {
                         Some(IDC_IBEAM)
                     } else {
                         None
@@ -193,9 +200,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 let point = point_from(lparam);
                 let (selecting, changed) = {
                     let view = &mut *ptr;
+                    let inside_account = view.account_panel_at(point);
                     let action = view.hit(point);
-                    let selecting = view.reader.signed_in && action.is_none() && view.begin_text_selection(point);
-                    let changed = selecting || view.clear_text_selection();
+                    let dismissed = !inside_account && action != Some(Action::Account) && view.dismiss_account();
+                    let selecting = view.reader.signed_in && !inside_account && action.is_none() && view.begin_text_selection(point);
+                    let changed = (selecting || view.clear_text_selection()) || dismissed;
                     view.mouse_press = if selecting { Some(MousePress::Text) } else { action.map(MousePress::Action) };
                     (selecting, changed)
                 };
@@ -238,6 +247,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             }
             WM_RBUTTONUP if (*ptr).reader.signed_in => {
                 let point = point_from(lparam);
+                if (*ptr).account_panel_at(point) {
+                    return 0;
+                }
+                if (*ptr).dismiss_account() {
+                    redraw(hwnd);
+                }
                 if let Some((label, text)) = copy_at(&*ptr, point) {
                     let mut screen = point;
                     ClientToScreen(hwnd, &mut screen);
@@ -258,6 +273,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
             }
             WM_MOUSEWHEEL if (*ptr).reader.signed_in => {
                 let view = &mut *ptr;
+                let mut point = point_from(lparam);
+                if ScreenToClient(hwnd, &mut point) != 0 && view.account_panel_at(point) {
+                    return 0;
+                }
                 let delta = (wparam >> 16) as i16 as i32;
                 let mut lines: u32 = 3;
                 SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut lines).cast(), 0);
@@ -299,7 +318,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                         return 0;
                     }
                     VK_ESCAPE => {
-                        let changed = (*ptr).clear_text_selection();
+                        let changed = (*ptr).dismiss_account() | (*ptr).clear_text_selection();
                         cancel_mouse_press(hwnd, ptr);
                         if changed {
                             redraw(hwnd);
@@ -453,43 +472,28 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                 }
             }
             Action::Account => {
-                let (items, anchor) = {
-                    let view = &*ptr;
-                    let signing_in = view.reader.signing_in();
-                    let name = view.reader.account.as_ref().and_then(|account| account.display_name.as_deref())
-                        .unwrap_or("CodeBuddy");
-                    let mut items = vec![
-                        (0, format!("{name}  ·  已登录"), false),
-                        (2, "查看剩余积分  ↗".into(), false),
-                    ];
-                    if signing_in {
-                        items.push((1, "取消登录".into(), false));
-                    } else if !view.reader.checking_models && view.reader.translation.is_none() {
-                        items.push((1, "重新登录 CodeBuddy".into(), false));
-                    }
-                    if signing_in && view.login_link.is_some() {
-                        items.push((3, "复制登录链接".into(), false));
-                    }
-                    (items, menu_anchor(view, action))
-                };
-                let selection = dropdown(hwnd, anchor, &items);
-                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr || !(*ptr).reader.signed_in {
-                    return;
+                let view = &mut *ptr;
+                if !view.dismiss_account() {
+                    view.open_account();
                 }
-                match selection {
-                    1 if (*ptr).reader.signing_in() => (*ptr).cancel_login(),
-                    1 => (*ptr).start_login(),
-                    2 => open_credit_usage(hwnd),
-                    3 => copy_login_link(hwnd, ptr),
-                    _ => {}
+            }
+            Action::AccountRefresh => (*ptr).reader.refresh_account(),
+            Action::AccountLogin => {
+                let view = &mut *ptr;
+                if view.reader.signing_in() {
+                    view.cancel_login();
+                } else {
+                    view.start_login();
                 }
             }
             Action::Models => {
                 let (items, ids, anchor) = {
                     let view = &*ptr;
                     let signing_in = view.reader.signing_in();
+                    let balance_label = view.account_balance_label()
+                        .map_or_else(|| "账户与积分".into(), |balance| format!("剩余积分  {balance}"));
                     let mut items = vec![
-                        (1, "剩余积分  ·  查看官方用量  ↗".into(), false),
+                        (1, balance_label, false),
                         (0, String::new(), false),
                     ];
                     let mut ids = Vec::new();
@@ -519,7 +523,7 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                     return;
                 }
                 match selection {
-                    1 => open_credit_usage(hwnd),
+                    1 => (*ptr).open_account(),
                     2 => (*ptr).reader.refresh_models(),
                     id if id >= 3 => {
                         if let Some(id) = ids.get((id - 3) as usize) {
@@ -599,14 +603,6 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
             }
         }
         redraw(hwnd);
-    }
-}
-
-fn open_credit_usage(hwnd: HWND) {
-    let target = wide("https://www.codebuddy.cn/profile/usage");
-    let verb = wide("open");
-    if unsafe { ShellExecuteW(hwnd, verb.as_ptr(), target.as_ptr(), null(), null(), SW_SHOWNORMAL) } as isize <= 32 {
-        alert(hwnd, "无法在默认浏览器打开 CodeBuddy 积分用量入口。");
     }
 }
 

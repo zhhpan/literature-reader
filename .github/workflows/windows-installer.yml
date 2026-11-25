@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   build:
+    name: Windows x64
     runs-on: windows-2025
     timeout-minutes: 30
     env:
@@ -121,6 +122,7 @@ jobs:
           compression-level: 0
 
   build_wayland:
+    name: Linux Wayland x86_64
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -279,7 +281,15 @@ jobs:
 
           $release = Get-Release
           if (!$release) {
-              gh release create $tag @uploadPaths --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
+              $notesPath = Join-Path $installer.DirectoryName 'release-notes.md'
+              $notes = @(
+                  '### 按平台下载安装',
+                  '',
+                  "- **Windows x64** [下载安装程序](https://github.com/$repo/releases/download/$tag/$env:INSTALLER_NAME)",
+                  "- **Linux Wayland x86_64** [下载压缩包](https://github.com/$repo/releases/download/$tag/$env:WAYLAND_NAME) · [运行说明](https://github.com/$repo/blob/$tag/installer/linux/README.md)"
+              ) -join "`n"
+              [IO.File]::WriteAllText($notesPath, $notes)
+              gh release create $tag @uploadPaths --repo $repo --verify-tag --target $commit --title $tag --notes-file $notesPath --generate-notes --draft
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               $release = Get-Release
           }
