@@ -1,10 +1,10 @@
 # 文献阅读器
 
-一个使用 Rust 和 Windows 原生界面的免费桌面阅读器。导入带文字层的论文 PDF 后，按阅读顺序显示原文和对应的简体中文译文。源码采用 MIT 许可证。
+一个使用 Rust 的免费双语桌面阅读器，支持 Windows 原生界面和 Linux 原生 Wayland。导入带文字层的论文 PDF 后，按阅读顺序显示原文和对应的简体中文译文。源码采用 MIT 许可证。
 
 ## 安装与阅读
 
-1. 下载并运行 Windows x64 安装包。在安装向导的「选择安装位置」页面可更改目录，覆盖安装时默认填入原目录。安装程序会下载并校验所需的运行库，已安装且通过校验的 Node.js 可以复用。 [GitHub Releases](https://github.com/zhhpan/literature-reader/releases/latest)
+1. 下载并运行 Windows x64 安装包。在安装向导的「选择安装位置」页面可更改目录，覆盖安装时默认填入原目录。首次安装会下载并校验所需的运行库。 [GitHub Releases](https://github.com/zhhpan/literature-reader/releases/latest)
 2. 从开始菜单打开「Literature Reader」，完成 CodeBuddy 登录。进入后可从「最近阅读」打开已有记录，单击「打开 PDF」，或将 PDF 拖到窗口。
 3. 在双语视图连续滚动阅读整篇论文。标题和译名居中，作者信息保留原文，小标题和正文使用不同字样。拖动鼠标选中文字后按 Ctrl+C 复制，也可右键复制整段或切到「PDF 原页」核对版面。
 4. 点正文区块的引用可跳转到对应的文末条目。带 DOI 或来源网址的条目可以打开论文出处。
@@ -12,7 +12,9 @@
 
 ## 更新
 
-启动时会在后台读取 GitHub Releases 的公开更新清单，也可以从底部状态栏手动「检查更新」。较早的发布可通过 GitHub API 查询。从 v0.1.7 起，点「更新到」并确认一次，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装，成功后重新打开阅读器。
+Windows 启动时会在后台读取 GitHub Releases 的公开更新清单，也可以从底部状态栏手动「检查更新」。较早的发布可通过 GitHub API 查询。点「更新到」并确认一次后，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装。升级时直接复用通过 SHA-256 校验的 Node.js、Poppler 和翻译 SDK，成功后重新打开阅读器。
+
+Linux x86_64 版可在 Wayland 合成器会话中直接运行。依赖 GTK 4 和 Poppler，归档内含 Node.js。下载新版归档后解压启动，阅读数据存放在 XDG 数据目录。 [Linux 使用说明](installer/linux/README.md)
 
 ## 账号登录和翻译
 
@@ -66,7 +68,7 @@ cargo build --release --locked --target x86_64-pc-windows-msvc
 
 ### GitHub Actions 打包
 
-在 GitHub 的 Actions 页面手动运行「Windows installer」可下载预览安装包。推送与 `Cargo.toml` 版本一致的标签（如 `v0.1.8`）会构建 x64 安装包，并在校验 SHA-256 后发布到 GitHub Releases。每个版本发布一个安装包和一份供应用读取的更新清单。 [工作流](.github/workflows/windows-installer.yml)
+在 GitHub 的 Actions 页面手动运行「Desktop packages」可下载预览安装包。推送与 `Cargo.toml` 版本一致的标签会构建 Windows x64 安装包和 Linux Wayland x86_64 归档，在校验 SHA-256 后与更新清单一同发布到 GitHub Releases。 [工作流](.github/workflows/windows-installer.yml)
 
 ### 发布签名版
 

@@ -1,12 +1,12 @@
 [package]
 name = "literature-reader"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "A desktop reader for bilingual academic PDFs"
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 embed-resource = "3.0"
 
 [dependencies]
@@ -14,6 +14,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { package = "gtk4", version = "0.10", features = ["v4_8"] }
+libc = "0.2"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

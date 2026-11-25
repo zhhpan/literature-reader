@@ -2,9 +2,18 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::PathBuf;
 
+#[cfg(windows)]
 pub fn data_directory() -> Option<PathBuf> {
     let directory = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
     directory.is_absolute().then(|| directory.join("LiteratureReader"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn data_directory() -> Option<PathBuf> {
+    let absolute = |name| std::env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute());
+    absolute("XDG_DATA_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".local/share")))
+        .map(|directory| directory.join("literature-reader"))
 }
 
 fn model_path() -> Option<PathBuf> {

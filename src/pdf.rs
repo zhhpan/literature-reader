@@ -230,9 +230,7 @@ fn input_path(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn command(program: &str) -> Command {
-    #[cfg(windows)]
-    let program = crate::runtime::executable(format!("runtime/poppler/Library/bin/{program}.exe"), program);
-    let mut process = Command::new(program);
+    let mut process = Command::new(crate::runtime::poppler(program));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

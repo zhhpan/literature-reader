@@ -73,6 +73,7 @@ try {
     if ($Offline) { $npmOptions += '--offline' }
     & npm.cmd @npmOptions
     if ($LASTEXITCODE -ne 0) { throw 'Unable to install the locked translation dependencies.' }
+    & (Join-Path $PSScriptRoot 'collect-bridge-checksums.ps1') -PayloadDir $stage.FullName
 
     Copy-Item -LiteralPath (Join-Path $project 'LICENSE') -Destination (Join-Path $notices 'literature-reader.txt')
     Copy-Item -LiteralPath (Join-Path $project 'src\data\SCOWL-Copyright.txt') -Destination $notices

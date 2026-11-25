@@ -7,9 +7,11 @@
 
 #define NodeDirectory "node-v22.23.5-win-x64"
 #define PopplerDirectory "poppler-26.09.0"
+#define PopplerManifest PopplerDirectory + ".sha256"
 #define PopplerBinSource "{tmp}\reader-deps\" + PopplerDirectory + "\Library\bin"
 #define PopplerBinTarget "{app}\runtime\poppler\Library\bin"
-#define SdkVendor "\node_modules\@tencent-ai\agent-sdk\cli\vendor"
+#define SdkVendorRoot "\@tencent-ai\agent-sdk\cli\vendor"
+#define SdkVendor "\node_modules" + SdkVendorRoot
 
 [Setup]
 AppId={{9B509341-8C39-4166-AEA1-25FB747E2231}
@@ -44,22 +46,28 @@ SignedUninstallerDir={#PayloadDir}
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [Files]
+Source: "{#PopplerManifest}"; Flags: dontcopy
+Source: "{#PayloadDir}\reader-bridge-launcher.sha256"; Flags: dontcopy
+Source: "{#PayloadDir}\reader-bridge-sdk.sha256"; Flags: dontcopy
 Source: "{#PayloadDir}\literature-reader.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\bridge\bridge.mjs"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher
+Source: "{#PayloadDir}\bridge\package.json"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher
+Source: "{#PayloadDir}\bridge\package-lock.json"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher
 ; The SDK selects its native helpers by Node.js platform and architecture.
-Source: "{#PayloadDir}\bridge\*"; DestDir: "{app}\bridge"; Excludes: "{#SdkVendor}\ripgrep\*-darwin\*,{#SdkVendor}\ripgrep\*-linux\*,{#SdkVendor}\genie-trash\darwin-*,{#SdkVendor}\genie-trash\linux-*"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#PayloadDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\bridge\node_modules\*"; DestDir: "{app}\bridge\node_modules"; Excludes: "\.package-lock.json,{#SdkVendorRoot}\ripgrep\*-darwin\*,{#SdkVendorRoot}\ripgrep\*-linux\*,{#SdkVendorRoot}\genie-trash\darwin-*,{#SdkVendorRoot}\genie-trash\linux-*"; Flags: ignoreversion recursesubdirs createallsubdirs solidbreak; Check: NeedsBridgeSdk
+Source: "{#PayloadDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs solidbreak
 
 ; PrepareToInstall verifies upstream archives before copying these files.
 Source: "{tmp}\reader-deps\{#NodeDirectory}\node.exe"; DestDir: "{app}\runtime\node"; ExternalSize: 90_000_000; Flags: external ignoreversion; Check: NeedsNodeRuntime
 Source: "{tmp}\reader-deps\{#NodeDirectory}\LICENSE"; DestDir: "{app}\runtime\node"; ExternalSize: 150_000; Flags: external ignoreversion; Check: NeedsNodeRuntime
-Source: "{#PopplerBinSource}\pdfinfo.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion
-Source: "{#PopplerBinSource}\pdfimages.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion
-Source: "{#PopplerBinSource}\pdftohtml.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 250_000; Flags: external ignoreversion
-Source: "{#PopplerBinSource}\pdftoppm.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion
-Source: "{#PopplerBinSource}\pdftotext.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion
-Source: "{#PopplerBinSource}\*.dll"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 115_000_000; Flags: external ignoreversion
+Source: "{#PopplerBinSource}\pdfinfo.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
+Source: "{#PopplerBinSource}\pdfimages.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
+Source: "{#PopplerBinSource}\pdftohtml.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 250_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
+Source: "{#PopplerBinSource}\pdftoppm.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
+Source: "{#PopplerBinSource}\pdftotext.exe"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 100_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
+Source: "{#PopplerBinSource}\*.dll"; DestDir: "{#PopplerBinTarget}"; ExternalSize: 115_000_000; Flags: external ignoreversion; Check: NeedsPopplerRuntime
 ; Keep runtime data, configuration, and license files. Omit development files and extra tools.
-Source: "{tmp}\reader-deps\{#PopplerDirectory}\*"; DestDir: "{app}\runtime\poppler"; Excludes: "\Library\bin\*,\Library\include\*,\Library\lib\*.lib,\Library\lib\pkgconfig\*,\Library\share\man\*"; ExternalSize: 20_000_000; Flags: external ignoreversion recursesubdirs
+Source: "{tmp}\reader-deps\{#PopplerDirectory}\*"; DestDir: "{app}\runtime\poppler"; Excludes: "\Library\bin\*,\Library\include\*,\Library\lib\*.lib,\Library\lib\pkgconfig\*,\Library\share\man\*"; ExternalSize: 20_000_000; Flags: external ignoreversion recursesubdirs; Check: NeedsPopplerRuntime
 
 [InstallDelete]
 ; Clean up SDK binaries previously installed by the Windows package.
@@ -101,6 +109,9 @@ const
 var
   DownloadPage: TDownloadWizardPage;
   ReuseNodeRuntime: Boolean;
+  ReusePopplerRuntime: Boolean;
+  ReuseBridgeLauncher: Boolean;
+  ReuseBridgeSdk: Boolean;
 
 function OpenReaderProcess(Access: Cardinal; InheritHandle: LongInt; ProcessId: Cardinal): THandle;
 external 'OpenProcess@kernel32.dll stdcall';
@@ -159,6 +170,70 @@ begin
   Result := not ReuseNodeRuntime;
 end;
 
+function NeedsPopplerRuntime: Boolean;
+begin
+  Result := not ReusePopplerRuntime;
+end;
+
+function NeedsBridgeSdk: Boolean;
+begin
+  Result := not ReuseBridgeSdk;
+end;
+
+function NeedsBridgeLauncher: Boolean;
+begin
+  Result := not ReuseBridgeLauncher;
+end;
+
+function MatchesDependencyManifest(Directory: String; ManifestName: String; ArchiveHash: String): Boolean;
+var
+  ManifestPath: String;
+  Entries: TArrayOfString;
+  FirstEntry: Integer;
+  Index: Integer;
+  ExpectedHash: String;
+  RelativePath: String;
+  FilePath: String;
+begin
+  Result := False;
+  if not DirExists(Directory) then
+    Exit;
+  try
+    ManifestPath := ExpandConstant('{tmp}\') + ManifestName;
+    if not FileExists(ManifestPath) then
+      ExtractTemporaryFile(ManifestName);
+    if not LoadStringsFromFile(ManifestPath, Entries) or (GetArrayLength(Entries) = 0) then
+      Exit;
+    FirstEntry := 0;
+    if ArchiveHash <> '' then
+    begin
+      if CompareText(Entries[0], ArchiveHash) <> 0 then
+        Exit;
+      FirstEntry := 1;
+    end;
+    if GetArrayLength(Entries) <= FirstEntry then
+      Exit;
+    for Index := FirstEntry to GetArrayLength(Entries) - 1 do
+    begin
+      if (Length(Entries[Index]) < 66) or (Entries[Index][65] <> ' ') then
+        Exit;
+      ExpectedHash := Copy(Entries[Index], 1, 64);
+      RelativePath := Copy(Entries[Index], 66, Length(Entries[Index]));
+      if (RelativePath[1] = '\') or (Pos(':', RelativePath) <> 0) or
+         (Pos('/', RelativePath) <> 0) or (Pos('\..\', '\' + RelativePath + '\') <> 0) then
+        Exit;
+      FilePath := AddBackslash(Directory) + RelativePath;
+      if not FileExists(FilePath) then
+        Exit;
+      if CompareText(GetSHA256OfFile(FilePath), ExpectedHash) <> 0 then
+        Exit;
+    end;
+    Result := True;
+  except
+    Log('Could not verify the installed dependency files against ' + ManifestName + '.');
+  end;
+end;
+
 function HasPinnedNodeRuntime: Boolean;
 var
   NodePath: String;
@@ -207,10 +282,19 @@ begin
   end;
   Staging := ExpandConstant('{tmp}\reader-deps');
   ReuseNodeRuntime := HasPinnedNodeRuntime;
+  ReusePopplerRuntime := MatchesDependencyManifest(ExpandConstant('{app}\runtime\poppler'),
+    '{#PopplerManifest}', PopplerHash);
+  ReuseBridgeLauncher := MatchesDependencyManifest(ExpandConstant('{app}\bridge'),
+    'reader-bridge-launcher.sha256', '');
+  ReuseBridgeSdk := MatchesDependencyManifest(ExpandConstant('{app}\bridge\node_modules'),
+    'reader-bridge-sdk.sha256', '');
+  if ReuseNodeRuntime and ReusePopplerRuntime then
+    Exit;
   DownloadPage.Clear;
   if NeedsNodeRuntime then
     DownloadPage.Add(NodeUrl, 'node.7z', NodeHash);
-  DownloadPage.Add(PopplerUrl, 'poppler.zip', PopplerHash);
+  if NeedsPopplerRuntime then
+    DownloadPage.Add(PopplerUrl, 'poppler.zip', PopplerHash);
   DownloadPage.Show;
   try
     try
@@ -224,15 +308,17 @@ begin
            not FileExists(Staging + '\{#NodeDirectory}\LICENSE') then
           RaiseException('The verified Node.js archive did not contain the expected runtime files.');
       end;
-      ExtractArchive(ExpandConstant('{tmp}\poppler.zip'), Staging, '', True, nil);
-
-      PopplerBin := Staging + '\{#PopplerDirectory}\Library\bin\';
-      if not FileExists(PopplerBin + 'pdfinfo.exe') or
-         not FileExists(PopplerBin + 'pdfimages.exe') or
-         not FileExists(PopplerBin + 'pdftohtml.exe') or
-         not FileExists(PopplerBin + 'pdftoppm.exe') or
-         not FileExists(PopplerBin + 'pdftotext.exe') then
-        RaiseException('The verified Poppler archive did not contain the expected runtime files.');
+      if NeedsPopplerRuntime then
+      begin
+        ExtractArchive(ExpandConstant('{tmp}\poppler.zip'), Staging, '', True, nil);
+        PopplerBin := Staging + '\{#PopplerDirectory}\Library\bin\';
+        if not FileExists(PopplerBin + 'pdfinfo.exe') or
+           not FileExists(PopplerBin + 'pdfimages.exe') or
+           not FileExists(PopplerBin + 'pdftohtml.exe') or
+           not FileExists(PopplerBin + 'pdftoppm.exe') or
+           not FileExists(PopplerBin + 'pdftotext.exe') then
+          RaiseException('The verified Poppler archive did not contain the expected runtime files.');
+      end;
     except
       Result := 'Setup could not prepare the required components.' + #13#10 + GetExceptionMessage;
     end;

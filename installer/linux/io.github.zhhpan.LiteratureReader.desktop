@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Literature Reader
+Name[zh_CN]=文献阅读器
+Comment=Read and translate academic PDFs
+Comment[zh_CN]=阅读并翻译学术 PDF
+Exec=literature-reader %f
+Icon=io.github.zhhpan.LiteratureReader
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;

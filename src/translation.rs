@@ -4,18 +4,27 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(windows)]
 use std::mem::{size_of, zeroed};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(windows)]
 use std::ptr::null;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, RecvTimeoutError};
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use url::Url;
+#[cfg(windows)]
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -24,6 +33,10 @@ use windows_sys::Win32::System::JobObjects::{
 const MAX_BATCH_CHARACTERS: usize = 3_000;
 const MAX_BATCH_PARAGRAPHS: usize = 12;
 const MAX_BRIDGE_EVENT_BYTES: u64 = 1024 * 1024;
+
+// None means the application is shutting down and must not start another SDK child.
+#[cfg(target_os = "linux")]
+static BRIDGE_GROUPS: Mutex<Option<Vec<libc::pid_t>>> = Mutex::new(Some(Vec::new()));
 const RULES: &str = concat!(
     "Translate the supplied source text into Simplified Chinese for an academic paper. ",
     "Preserve numbers, equations, variables, citations, identifiers, names, figure numbers, and list markers. ",
@@ -433,9 +446,7 @@ pub(crate) fn official_login_url(raw: &str) -> Option<String> {
 
 fn bridge_path() -> Result<PathBuf, String> {
     let executable = std::env::current_exe().map_err(|error| format!("无法定位阅读器：{error}"))?;
-    executable.ancestors().skip(1).take(3)
-        .map(|folder| folder.join("bridge").join("bridge.mjs"))
-        .find(|script| script.is_file())
+    crate::runtime::bridge(&executable)
         .ok_or_else(|| "找不到 CodeBuddy 接入组件，请使用完整的阅读器目录。".into())
 }
 
@@ -472,6 +483,7 @@ struct BridgeProcess {
     child: Child,
     input: Option<ChildStdin>,
     incoming: mpsc::Receiver<Result<BridgeEvent, String>>,
+    #[cfg(windows)]
     job: Option<OwnedHandle>,
     _working_dir: Option<tempfile::TempDir>,
 }
@@ -485,17 +497,29 @@ impl BridgeProcess {
             || path.parent().expect("bridge script resides in a directory"),
             |work| work.path(),
         );
-        let node = crate::runtime::executable("runtime/node/node.exe", "node.exe");
-        let mut child = Command::new(node)
-            .arg(&path)
+        let mut command = Command::new(crate::runtime::node());
+        command.arg(&path)
             .arg(operation)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(0x08000000)
-            .spawn()
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        #[cfg(target_os = "linux")]
+        command.process_group(0);
+        #[cfg(target_os = "linux")]
+        let mut bridge_groups = BRIDGE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(target_os = "linux")]
+        let groups = bridge_groups.as_mut().ok_or_else(|| "阅读器正在关闭。".to_owned())?;
+        let mut child = command.spawn()
             .map_err(|error| format!("无法启动 CodeBuddy 接入组件，请确认 Node.js 已安装：{error}"))?;
+        #[cfg(target_os = "linux")]
+        {
+            groups.push(child.id() as libc::pid_t);
+            drop(bridge_groups);
+        }
+        #[cfg(windows)]
         let job = match child_job(&child) {
             Ok(job) => job,
             Err(error) => {
@@ -528,7 +552,12 @@ impl BridgeProcess {
                 }
             }
         });
-        Ok(Self { child, input, incoming, job: Some(job), _working_dir: temp })
+        Ok(Self {
+            child, input, incoming,
+            #[cfg(windows)]
+            job: Some(job),
+            _working_dir: temp,
+        })
     }
 
     fn send(&mut self, payload: &Value) -> Result<(), String> {
@@ -548,8 +577,11 @@ impl BridgeProcess {
                 Ok(event) => return event,
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
+                    #[cfg(windows)]
                     let status = self.child.try_wait().ok().flatten().and_then(|status| status.code())
                         .map_or(String::new(), |code| format!("（退出码 {code}）"));
+                    #[cfg(target_os = "linux")]
+                    let status = "";
                     return Err(format!("CodeBuddy 接入组件未返回结果{status}。"));
                 }
             }
@@ -561,8 +593,33 @@ impl Drop for BridgeProcess {
     fn drop(&mut self) {
         self.input.take();
         // Closing the job terminates both the bridge and any SDK CLI child.
+        #[cfg(windows)]
         drop(self.job.take());
+        #[cfg(target_os = "linux")]
+        {
+            // Keep the group leader unreaped until after signalling its group,
+            // so the PID cannot be recycled as an unrelated process group.
+            let group = self.child.id() as libc::pid_t;
+            let mut bridge_groups = BRIDGE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner);
+            if unsafe { libc::killpg(group, libc::SIGKILL) } != 0 {
+                let _ = self.child.kill();
+            }
+            if let Some(groups) = bridge_groups.as_mut() {
+                groups.retain(|&active| active != group);
+            }
+        }
         let _ = self.child.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_bridges() {
+    let mut bridge_groups = BRIDGE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(groups) = bridge_groups.take() {
+        for group in groups {
+            // The registry lock excludes BridgeProcess::drop while signalling.
+            unsafe { libc::killpg(group, libc::SIGKILL) };
+        }
     }
 }
 
@@ -574,6 +631,7 @@ fn check_cancelled(cancel: Option<&AtomicBool>) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
 fn child_job(child: &Child) -> std::io::Result<OwnedHandle> {
     unsafe {
         let raw = CreateJobObjectW(null(), null());

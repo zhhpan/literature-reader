@@ -1,4 +1,4 @@
-name: Windows installer
+name: Desktop packages
 
 on:
   workflow_dispatch:
@@ -120,9 +120,87 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  build_wayland:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.91.1-x86_64-unknown-linux-gnu
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      CARGO_INCREMENTAL: '0'
+    outputs:
+      artifact: ${{ steps.package.outputs.artifact }}
+      filename: ${{ steps.package.outputs.filename }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      commit: ${{ steps.package.outputs.commit }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '22.23.5'
+          package-manager-cache: false
+
+      - name: Install Rust and its bundled copyright notices
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-docs
+
+      - name: Install GTK and Wayland test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev weston dbus-daemon desktop-file-utils poppler-utils
+
+      - name: Verify version
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "literature-reader") | .version')
+          if [[ ! $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Cargo.toml must use a stable three-part version.' >&2
+            exit 1
+          fi
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo version $version." >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test the Linux x86_64 executable
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-gnu
+          cargo test --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Package and smoke-test the native Wayland build
+        id: package
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          bash installer/build-wayland.sh
+          filename="LiteratureReader-Wayland-$APP_VERSION-x86_64.tar.gz"
+          path="target/release/$filename"
+          bash installer/linux/smoke-wayland.sh "$path"
+          digest=$(sha256sum -- "$path" | cut -d ' ' -f 1)
+          commit=$(git rev-parse HEAD)
+          {
+            echo "artifact=LiteratureReader-Wayland-x86_64-$GITHUB_RUN_ATTEMPT"
+            echo "filename=$filename"
+            echo "sha256=$digest"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+          printf '\x60%s\x60 SHA-256 \x60%s\x60\n' "$filename" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the Wayland archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: target/release/${{ steps.package.outputs.filename }}
+          if-no-files-found: error
+          compression-level: 0
+
   publish:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: build
+    needs: [build, build_wayland]
     runs-on: windows-2025
     timeout-minutes: 10
     permissions:
@@ -134,12 +212,21 @@ jobs:
           name: ${{ needs.build.outputs.artifact }}
           path: ${{ runner.temp }}/reader-release
 
-      - name: Publish the verified installer
+      - name: Download the Wayland archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build_wayland.outputs.artifact }}
+          path: ${{ runner.temp }}/reader-wayland-release
+
+      - name: Publish the verified desktop packages
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_COMMIT: ${{ needs.build.outputs.commit }}
           INSTALLER_NAME: ${{ needs.build.outputs.filename }}
           INSTALLER_SHA256: ${{ needs.build.outputs.sha256 }}
+          WAYLAND_COMMIT: ${{ needs.build_wayland.outputs.commit }}
+          WAYLAND_NAME: ${{ needs.build_wayland.outputs.filename }}
+          WAYLAND_SHA256: ${{ needs.build_wayland.outputs.sha256 }}
         run: |
           $repo = $env:GITHUB_REPOSITORY
           $tag = $env:GITHUB_REF_NAME
@@ -148,28 +235,41 @@ jobs:
           if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $env:INSTALLER_SHA256) {
               throw 'Downloaded artifact failed SHA-256 verification.'
           }
+          $waylandPath = Join-Path (Join-Path $env:RUNNER_TEMP 'reader-wayland-release') $env:WAYLAND_NAME
+          $wayland = Get-Item -LiteralPath $waylandPath
+          if ((Get-FileHash -LiteralPath $waylandPath -Algorithm SHA256).Hash -ne $env:WAYLAND_SHA256) {
+              throw 'Downloaded Wayland archive failed SHA-256 verification.'
+          }
           $commit = gh api "repos/$repo/commits/$tag" --jq '.sha'
-          if ($LASTEXITCODE -ne 0 -or $commit -ne $env:BUILD_COMMIT) {
-              throw 'Release tag does not point to the built commit.'
+          if ($LASTEXITCODE -ne 0 -or $commit -ne $env:BUILD_COMMIT -or $commit -ne $env:WAYLAND_COMMIT) {
+              throw 'Release tag does not point to both package builds.'
           }
 
           $manifestName = 'reader-update.json'
           $manifestPath = Join-Path $installer.DirectoryName $manifestName
+          $packages = @(
+              @{ File = $installer; Hash = $env:INSTALLER_SHA256 }
+              @{ File = $wayland; Hash = $env:WAYLAND_SHA256 }
+          )
           $manifest = [ordered]@{
               tag_name = $tag
               draft = $false
               prerelease = $false
-              assets = @([ordered]@{
-                  name = $env:INSTALLER_NAME
-                  state = 'uploaded'
-                  size = $installer.Length
-                  browser_download_url = "https://github.com/$repo/releases/download/$tag/$env:INSTALLER_NAME"
-                  digest = "sha256:$env:INSTALLER_SHA256"
+              assets = @($packages | ForEach-Object {
+                  [ordered]@{
+                      name = $_.File.Name
+                      state = 'uploaded'
+                      size = $_.File.Length
+                      browser_download_url = "https://github.com/$repo/releases/download/$tag/$($_.File.Name)"
+                      digest = "sha256:$($_.Hash)"
+                  }
               })
           } | ConvertTo-Json -Depth 4 -Compress
           [IO.File]::WriteAllText($manifestPath, $manifest)
           $manifestFile = Get-Item -LiteralPath $manifestPath
           $manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $publishedFiles = $packages + @{ File = $manifestFile; Hash = $manifestDigest }
+          $uploadPaths = @($publishedFiles | ForEach-Object { $_.File.FullName })
 
           function Get-Release {
               $data = gh api --paginate "repos/$repo/releases?per_page=100" --jq ".[] | select(.tag_name == `"$tag`")"
@@ -179,19 +279,20 @@ jobs:
 
           $release = Get-Release
           if (!$release) {
-              gh release create $tag $installer.FullName $manifestPath --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
+              gh release create $tag @uploadPaths --repo $repo --verify-tag --target $commit --title $tag --generate-notes --draft
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               $release = Get-Release
           }
           $assets = @($release.assets)
-          $installerAsset = @($assets | Where-Object name -CEQ $env:INSTALLER_NAME)
-          $manifestAsset = @($assets | Where-Object name -CEQ $manifestName)
-          if ($assets.Count -ne 2 -or $installerAsset.Count -ne 1 -or $manifestAsset.Count -ne 1 -or
-              $installerAsset.state -ne 'uploaded' -or $installerAsset.size -ne $installer.Length -or
-              $installerAsset.digest -ne "sha256:$env:INSTALLER_SHA256" -or
-              $manifestAsset.state -ne 'uploaded' -or $manifestAsset.size -ne $manifestFile.Length -or
-              $manifestAsset.digest -ne "sha256:$manifestDigest") {
-              throw "Release $tag must contain the verified installer and update manifest. Inspect the existing release before trying again."
+          if ($assets.Count -ne $publishedFiles.Count) {
+              throw "Release $tag does not contain the expected number of assets."
+          }
+          foreach ($item in $publishedFiles) {
+              $match = @($assets | Where-Object name -CEQ $item.File.Name)
+              if ($match.Count -ne 1 -or $match[0].state -ne 'uploaded' -or
+                  $match[0].size -ne $item.File.Length -or $match[0].digest -ne "sha256:$($item.Hash)") {
+                  throw "Release $tag could not verify $($item.File.Name)."
+              }
           }
           if ($release.draft) {
               $published = gh api --method PATCH "repos/$repo/releases/$($release.id)" -F draft=false -f make_latest=legacy

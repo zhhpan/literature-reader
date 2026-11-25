@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 const DIRECTORY: &str = "recent-documents-v1";
@@ -14,7 +13,7 @@ const MAX_RECORD_BYTES: u64 = 256 * 1024;
 #[derive(Deserialize, Serialize)]
 pub struct RecentDocument {
     id: PdfId,
-    #[serde(with = "windows_path")]
+    #[serde(with = "native_path")]
     pub path: PathBuf,
     pub title: String,
 }
@@ -111,19 +110,36 @@ fn save_document(directory: &Path, entry: &RecentDocument) -> io::Result<()> {
     Ok(())
 }
 
-mod windows_path {
+mod native_path {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    #[cfg(windows)]
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    #[cfg(target_os = "linux")]
+    type PathUnit = u8;
+    #[cfg(windows)]
+    type PathUnit = u16;
 
     pub fn serialize<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(path.as_os_str().encode_wide())
+        #[cfg(windows)]
+        let units = path.as_os_str().encode_wide();
+        #[cfg(target_os = "linux")]
+        let units = path.as_os_str().as_bytes();
+        serializer.collect_seq(units)
     }
 
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
-        let path = Vec::<u16>::deserialize(deserializer)?;
+        let path = Vec::<PathUnit>::deserialize(deserializer)?;
         if path.contains(&0) {
             return Err(serde::de::Error::custom("文件路径包含空字符"));
         }
-        Ok(OsString::from_wide(&path).into())
+        #[cfg(windows)]
+        let path = OsString::from_wide(&path);
+        #[cfg(target_os = "linux")]
+        let path = OsString::from_vec(path);
+        Ok(path.into())
     }
 }
 
@@ -136,8 +152,10 @@ mod tests {
     #[test]
     fn keeps_latest_record_for_a_path_and_preserves_other_documents() {
         let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let path = PathBuf::from(r"C:\文献\论文.pdf");
-        let other_path = PathBuf::from(r"D:\资料\另一篇.pdf");
+        #[cfg(windows)]
+        let (path, other_path) = (PathBuf::from(r"C:\文献\论文.pdf"), PathBuf::from(r"D:\资料\另一篇.pdf"));
+        #[cfg(target_os = "linux")]
+        let (path, other_path) = (PathBuf::from("/文献/论文.pdf"), PathBuf::from("/资料/另一篇.pdf"));
         let entries = [
             RecentDocument { id: [1; 32], path: path.clone(), title: "旧内容".into() },
             RecentDocument { id: [2; 32], path: other_path.clone(), title: "另一篇".into() },
@@ -157,5 +175,16 @@ mod tests {
         assert_eq!(records.entries()[0].path, path);
         assert_eq!(records.entries()[0].title, "新内容");
         assert_eq!(records.entries()[1].path, other_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn preserves_linux_paths_with_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(b"/pdf/\xff.pdf".to_vec()));
+        let entry = RecentDocument { id: [1; 32], path: path.clone(), title: "测试文档".into() };
+        let stored = serde_json::to_vec(&entry).unwrap();
+        assert_eq!(serde_json::from_slice::<RecentDocument>(&stored).unwrap().path, path);
     }
 }
