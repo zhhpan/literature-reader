@@ -21,8 +21,18 @@ end
 
 M.EXE_NAME = EXE_NAME
 
--- Every candidate in resolution order: { value, verify }.
--- The bare PATH fallback is not verified (tern.fs.exists cannot search PATH).
+-- The plugin's own runtime. Downloading it here keeps the Tern plugin and the
+-- desktop app independent: neither needs the other's executable.
+function M.bundleDir()
+	return join(tern.plugin.data, "backend")
+end
+
+function M.bundleExe()
+	return join(M.bundleDir(), EXE_NAME)
+end
+
+-- Resolution order. The bundled runtime is the normal path; kv/env are
+-- developer overrides, never a setup step.
 function M.candidates()
 	local list = {}
 
@@ -38,16 +48,7 @@ function M.candidates()
 		table.insert(list, { path = fromEnv, verify = true, source = "env" })
 	end
 
-	if WINDOWS then
-		local localAppData = tern.getenv("LOCALAPPDATA")
-		if localAppData and localAppData ~= "" then
-			table.insert(list, {
-				path = join(join(localAppData, "Programs"), join("Literature Reader", EXE_NAME)),
-				verify = true,
-				source = "install",
-			})
-		end
-	end
+	table.insert(list, { path = M.bundleExe(), verify = true, source = "bundle" })
 
 	local dir = tern.plugin.dir
 	if dir and dir ~= "" then
@@ -63,12 +64,11 @@ function M.candidates()
 		})
 	end
 
-	table.insert(list, { path = EXE_NAME, verify = false, source = "PATH" })
 	return list
 end
 
--- One resolution per block. The first existing candidate wins; when none
--- exists the bare program name is returned so the PATH lookup can try.
+-- One resolution per block. The first existing candidate wins; nil means the
+-- plugin must prepare (download) its bundled backend.
 function M.resolveExe()
 	local candidates = M.candidates()
 	for _, candidate in ipairs(candidates) do

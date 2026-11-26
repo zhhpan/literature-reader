@@ -26,6 +26,7 @@ jobs:
       filename: ${{ steps.package.outputs.filename }}
       sha256: ${{ steps.package.outputs.sha256 }}
       commit: ${{ steps.package.outputs.commit }}
+      version: ${{ steps.version.outputs.value }}
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -204,10 +205,48 @@ jobs:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [build, build_wayland]
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '22.23.5'
+          package-manager-cache: false
+
+      - name: Install the Tern backend dependencies
+        run: |
+          npm.cmd ci --prefix bridge --omit=dev --ignore-scripts --no-audit --no-fund --no-update-notifier
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $url = 'https://github.com/oschwartz10612/poppler-windows/releases/download/v26.09.0-0/Release-26.09.0-0.zip'
+          $hash = '7a6f256a0ddf7536182246a5733331bf4677cbcc34f4663774947ad34556c8d0'
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile poppler.zip
+          if ((Get-FileHash poppler.zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) {
+              throw 'Downloaded Poppler archive failed SHA-256 verification.'
+          }
+          Expand-Archive -LiteralPath poppler.zip -DestinationPath poppler -Force
+
+      - name: Package the portable Tern backend
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $bin = (Get-ChildItem poppler -Recurse -Filter pdftotext.exe | Select-Object -First 1).DirectoryName
+          if (!$bin) { throw 'Poppler tools are missing from the archive.' }
+          ./installer/package-backend.ps1 `
+              -AppExecutable target/release/literature-reader.exe `
+              -NodeExe (Get-Command node).Source `
+              -PopplerDir $bin `
+              -BridgeDir bridge `
+              -OutputDir target/tern-backend `
+              -ReleaseTag $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Download the installer artifact
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -270,7 +309,13 @@ jobs:
           [IO.File]::WriteAllText($manifestPath, $manifest)
           $manifestFile = Get-Item -LiteralPath $manifestPath
           $manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $publishedFiles = $packages + @{ File = $manifestFile; Hash = $manifestDigest }
+          $ternFiles = @(
+              Get-Item -LiteralPath 'target/tern-backend/literature-reader-tern-backend-win-x64.zip'
+              Get-Item -LiteralPath 'target/tern-backend/literature-reader-tern.json'
+          ) | ForEach-Object {
+              @{ File = $_; Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          $publishedFiles = $packages + @{ File = $manifestFile; Hash = $manifestDigest } + $ternFiles
           $uploadPaths = @($publishedFiles | ForEach-Object { $_.File.FullName })
 
           function Get-Release {

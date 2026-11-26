@@ -3,6 +3,7 @@
 local tern = require("tern")
 local util = require("./lib/util")
 local backend = require("./lib/backend")
+local install = require("./lib/install")
 local render = require("./lib/render")
 
 local POLL_MS = 600
@@ -665,6 +666,7 @@ local reader = {
 			loading = false,
 			loadError = nil,
 			exe = exe,
+			backend = nil,
 			dir = dir,
 			mode = (saved and (saved.mode == "page" and "page" or "bilingual")) or "bilingual",
 			page = (saved and tonumber(saved.page)) or 1,
@@ -713,15 +715,23 @@ local reader = {
 			state.page = 1
 		end
 
-		if state.path then
-			R.loadModels(cx, state)
-			R.loadDocument(cx, state)
-		else
-			R.loadRecent(cx, state)
+		local function start()
+			if state.path then
+				R.loadModels(cx, state)
+				R.loadDocument(cx, state)
+			else
+				R.loadRecent(cx, state)
+			end
+			if tern.kv.get("login_requested") == true then
+				tern.kv.set("login_requested", nil)
+				R.startLogin(cx, state)
+			end
 		end
-		if tern.kv.get("login_requested") == true then
-			tern.kv.set("login_requested", nil)
-			R.startLogin(cx, state)
+		if state.exe then
+			start()
+		else
+			state.backend = { state = "manifest", message = "正在准备阅读内核…" }
+			install.ensure(cx, state, start)
 		end
 		return state
 	end,
@@ -826,6 +836,15 @@ local reader = {
 			end
 		elseif act == "open" then
 			R.openDocument(cx, state, value)
+		elseif act == "backend-retry" then
+			install.ensure(cx, state, function()
+				if state.path then
+					R.loadModels(cx, state)
+					R.loadDocument(cx, state)
+				else
+					R.loadRecent(cx, state)
+				end
+			end)
 		elseif act == "reload" then
 			R.reload(cx, state)
 		end

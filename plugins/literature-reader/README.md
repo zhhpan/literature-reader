@@ -3,14 +3,14 @@
 在 Tern 里以原生区块（block）阅读「文献阅读器」生成的双语学术 PDF 视图：
 原文、简体中文翻译、公式标记、图表与原文页对照。
 
-插件本身只包含 Tern 包；PDF 解析、翻译与渲染由已安装的
-`literature-reader` 可执行文件提供的 `--tern` 无头后端完成。
+插件本身只包含 Tern 包；PDF 解析、翻译与渲染由 Rust 编写的
+`--tern` 无头后端完成。后端在首次打开时下载到插件数据目录，与桌面版互不依赖。
 
 ## 安装
 
-需要 Tern 0.9 或更新版本，以及已安装（或已编译）的 `literature-reader`。
-Windows 用户先运行 [安装包](https://github.com/zhhpan/literature-reader/releases/latest)，
-插件才能找到后端；Linux 源码构建见[主 README](../../README.md)。
+需要 Tern 0.9 或更新版本。插件自带运行时，**不需要安装桌面版，也不需要设置可执行程序**：
+首次打开时会从 GitHub Releases 下载一次精简后端（Windows x64，约 82 MB），
+之后完全离线可用。
 
 从 GitHub 安装（推荐；需要 `git`）：
 
@@ -47,7 +47,7 @@ tern plugin list
 
 首次使用前，还可在命令面板运行：
 
-- **文献阅读器：设置可执行文件…** — 指定 `literature-reader` 的完整路径；
+- **文献阅读器：设置可执行文件…** — 仅离线包或自定义构建需要；
 - **文献阅读器：自动翻译开/关** — 打开文献后是否自动翻译（默认关闭；开启后才会按模型自动开始，随时可在区块 dock 点「翻译」手动开始）。
 
 ## 打开方式
@@ -60,19 +60,17 @@ tern plugin list
 区块的按键：`t` 切换译文，`p` 切换双语/原页，`[` / `]` 在原页模式翻页，
 `r` 重新读取当前文献。
 
-## 可执行文件解析顺序
+## 运行时解析顺序
 
 每个区块解析一次，按顺序取第一个通过 `tern.fs.exists` 校验的候选：
 
-1. 插件键值 `exe`（由「设置可执行文件…」写入）；
-2. 环境变量 `LITERATURE_READER_EXE`；
-3. Windows：`%LOCALAPPDATA%\Programs\Literature Reader\literature-reader.exe`；
-4. 开发检出：`<plugin.dir>/../../target/release/literature-reader.exe`，
-   然后 `.../debug/literature-reader.exe`；
-5. 直接使用 PATH 上的 `literature-reader`（Windows 为 `literature-reader.exe`）。
+1. 插件键值 `exe` 或环境变量 `LITERATURE_READER_EXE`（仅开发者/离线覆盖）；
+2. 插件自带运行时：`<plugin.data>/backend/literature-reader.exe`；
+3. 开发检出：`<plugin.dir>/../../target/release/literature-reader.exe`，
+   然后 `.../debug/literature-reader.exe`。
 
-只有第 5 项不做存在性检查；若所有候选都无法启动，区块会显示错误卡片，
-并提示用命令面板设置路径。
+正常安装只会走第 2 项。缺失时区块显示「阅读内核」卡片，自动下载、校验 SHA-256
+并解压到插件数据目录；失败可点「重试」。不再探测桌面版安装目录或 PATH。
 
 ## 功能
 

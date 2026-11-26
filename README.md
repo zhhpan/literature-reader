@@ -22,7 +22,7 @@ tern plugin install github.com/zhhpan/literature-reader/plugins/literature-reade
 tern plugin link plugins/literature-reader
 ```
 
-安装后在命令面板使用「文献阅读器：打开标签页」「文献阅读器：打开 PDF…」「文献阅读器：登录 CodeBuddy」「文献阅读器：设置可执行文件…」和「文献阅读器：自动翻译开/关」。安装、可执行文件解析和已知限制见 [插件说明](plugins/literature-reader/README.md)。
+安装后在命令面板使用「文献阅读器：打开标签页」「文献阅读器：打开 PDF…」「文献阅读器：登录 CodeBuddy」和「文献阅读器：自动翻译开/关」。插件自带运行时，首次打开自动下载精简后端，不需要安装桌面版或设置可执行程序。安装、可执行文件解析和已知限制见 [插件说明](plugins/literature-reader/README.md)。
 
 ## 更新
 

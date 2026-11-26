@@ -417,7 +417,7 @@ function M.errorCard(state)
 		el("p", { class = "lr-error-text", text = message }),
 		el("p", {
 			class = "lr-hint",
-			text = "在命令面板运行「文献阅读器：设置可执行文件…」指定 literature-reader 的完整路径。",
+			text = "检查网络后重试，或在命令面板运行「文献阅读器：设置可执行文件…」使用离线后端。",
 		}),
 		el("p", { class = "lr-hint", text = "当前候选：" .. tostring(state.exe or "literature-reader") }),
 	}, { key = "error", tone = "error", icon = "warn" })
@@ -607,7 +607,7 @@ local function statusSpans(state)
 end
 
 function M.dock(state)
-	if not state.path then
+	if not state.path or not state.exe then
 		return nil
 	end
 	local snapshot = state.snapshot
@@ -705,6 +705,32 @@ function M.dock(state)
 	})
 end
 
+function M.backendCard(state)
+	local backend = state.backend or {}
+	local children = {}
+	add(children, el("p", {
+		class = "lr-hint",
+		text = backend.message or "正在准备阅读内核…",
+	}))
+	if backend.state == "error" then
+		add(children, el("p", { class = "lr-error-text", text = backend.error or "阅读内核准备失败。" }))
+		add(children, el("p", {
+			class = "lr-hint",
+			text = "首次使用需要联网下载一次，之后离线可用。",
+		}))
+		add(children, ui.button("重试", {
+			key = "backend-retry",
+			size = "sm",
+			icon = "repeat",
+			actions = { click = "backend-retry" },
+		}))
+		if backend.url and backend.url ~= "" then
+			add(children, el("p", { class = "lr-hint", text = backend.url }))
+		end
+	end
+	return ui.card({ ui.span("阅读内核", "strong") }, children, { key = "backend", icon = "box" })
+end
+
 function M.view(state)
 	local main = {}
 	if state.showModels then
@@ -715,7 +741,9 @@ function M.view(state)
 	end
 
 	local snapshot = state.snapshot
-	if not state.path then
+	if state.backend and state.backend.state ~= "ready" then
+		table.insert(main, M.backendCard(state))
+	elseif not state.path then
 		table.insert(main, M.recent(state))
 	elseif not snapshot then
 		if state.loadError then
