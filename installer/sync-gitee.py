@@ -23,7 +23,6 @@ def main() -> int:
     parser.add_argument("--assets", required=True, type=Path)
     parser.add_argument("--token", required=True)
     parser.add_argument("--repo", default="zhhpan/literature-reader")
-    parser.add_argument("--github-token", default="")
     args = parser.parse_args()
 
     version = args.tag.removeprefix("v")
@@ -110,9 +109,6 @@ def main() -> int:
                         "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
                         "commit", "-m", f"Update the Gitee manifest for {args.tag}"], check=True)
         subprocess.run(["git", "-C", str(root), "push", gitee_url, "HEAD:refs/heads/main", "HEAD:refs/heads/master"], check=True)
-        if args.github_token:
-            github_url = f"https://x-access-token:{args.github_token}@github.com/{args.repo}.git"
-            subprocess.run(["git", "-C", str(root), "push", github_url, "HEAD:refs/heads/main"], check=True)
     return 0
 
 

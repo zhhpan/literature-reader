@@ -29,7 +29,7 @@ tern plugin link plugins/literature-reader
 
 ## 更新
 
-Windows 启动时会在后台读取 GitHub Releases 的公开更新清单，也可以从底部状态栏手动「检查更新」。较早的发布可通过 GitHub API 查询。点「更新到」并确认一次后，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装。升级时直接复用通过 SHA-256 校验的 Node.js、Poppler 和翻译 SDK，成功后重新打开阅读器。
+Gitee 与 GitHub 同步发布（Gitee：https://gitee.com/zhhpan/literature-reader）。Windows 启动时优先读取 Gitee 的更新清单，Gitee 没有新版本或不可用时回退 GitHub Releases；也可以从底部状态栏手动「检查更新」。Gitee 单个附件上限 100 MB，安装包会拆成 4 个分片，更新器下载后合并并校验完整 SHA-256。较早的发布可通过 GitHub API 查询。点「更新到」并确认一次后，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装。升级时直接复用通过 SHA-256 校验的 Node.js、Poppler 和翻译 SDK，成功后重新打开阅读器。
 
 Linux x86_64 版可在 Wayland 合成器会话中直接运行。依赖 GTK 4 和 Poppler，归档内含 Node.js。两个平台共用发布版本号，应用内「检查更新」按平台识别对应的安装包。Linux 版发现更新时提供该版本的 Wayland 归档下载。解压运行新版即可继续使用 XDG 数据目录中的阅读记录。 [Linux 使用说明](installer/linux/README.md)
 
