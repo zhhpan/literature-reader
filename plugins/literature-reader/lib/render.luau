@@ -417,10 +417,25 @@ function M.errorCard(state)
 		el("p", { class = "lr-error-text", text = message }),
 		el("p", {
 			class = "lr-hint",
-			text = "检查网络后重试，或在命令面板运行「文献阅读器：设置可执行文件…」使用离线后端。",
+			text = "可点「刷新」重试；文件已移动或删除时，请从最近阅读或「打开 PDF…」重新选择。",
 		}),
-		el("p", { class = "lr-hint", text = "当前候选：" .. tostring(state.exe or "literature-reader") }),
+		el("p", { class = "lr-hint", text = "后端：" .. tostring(state.exe or "未就绪") }),
 	}, { key = "error", tone = "error", icon = "warn" })
+end
+
+function M.missingCard(state)
+	return ui.card({ ui.span("上次的文献不存在", "warning strong") }, {
+		el("p", { class = "lr-error-text", text = tostring(state.missingPath or "") }),
+		el("p", {
+			class = "lr-hint",
+			text = "文件可能已被移动或删除。从下面的最近阅读重新选择，或用「打开 PDF…」打开。",
+		}),
+		ui.button("知道了", {
+			key = "dismiss-missing",
+			size = "sm",
+			actions = { click = "dismiss-missing" },
+		}),
+	}, { key = "missing", tone = "warning", icon = "warn" })
 end
 
 function M.modelsCard(state)
@@ -740,6 +755,9 @@ function M.view(state)
 		table.insert(main, M.loginCard(state))
 	end
 
+	if state.missingPath then
+		table.insert(main, M.missingCard(state))
+	end
 	local snapshot = state.snapshot
 	if state.backend and state.backend.state ~= "ready" then
 		table.insert(main, M.backendCard(state))

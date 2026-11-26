@@ -437,6 +437,24 @@ function R.loadRecent(cx, state)
 end
 
 function R.loadDocument(cx, state)
+	if not state.path then
+		return
+	end
+	if not util.exists(state.path) then
+		-- A saved block can outlive a deleted or moved PDF. Show the recent
+		-- list instead of blaming the backend for a missing file.
+		state.missingPath = state.path
+		state.path = nil
+		state.snapshot = nil
+		state.loading = false
+		state.loadError = nil
+		state.jobError = nil
+		state.autoStarted = false
+		R.loadRecent(cx, state)
+		cx:render()
+		return
+	end
+	state.missingPath = nil
 	state.snapshot = nil
 	state.loading = true
 	state.loadError = nil
@@ -517,6 +535,7 @@ function R.openDocument(cx, state, path)
 		return
 	end
 	state.path = path
+	state.missingPath = nil
 	state.page = 1
 	state.showModels = false
 	state.images = {}
@@ -836,6 +855,9 @@ local reader = {
 			end
 		elseif act == "open" then
 			R.openDocument(cx, state, value)
+		elseif act == "dismiss-missing" then
+			state.missingPath = nil
+			cx:render()
 		elseif act == "backend-retry" then
 			install.ensure(cx, state, function()
 				if state.path then
