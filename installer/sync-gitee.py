@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-PART_BYTES = 60 * 1024 * 1024
+PART_BYTES = 30 * 1024 * 1024
 
 
 def fail(message: str) -> None:
