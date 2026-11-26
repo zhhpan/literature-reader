@@ -60,7 +60,7 @@ impl Raster {
         Some(Self { width: EDGE as i32, height: EDGE as i32, bgra })
     }
 
-    fn decode(ppm: &[u8]) -> Result<Self, String> {
+    pub(crate) fn decode(ppm: &[u8]) -> Result<Self, String> {
         fn decode_ppm(ppm: &[u8]) -> Option<Raster> {
             let mut pixels = ppm;
             let mut read_token = || {
@@ -219,12 +219,14 @@ pub struct Reader {
     pub translation: Option<ActiveTranslation>,
     pub translation_error: Option<String>,
     pub credits: DocumentCredits,
+    credits_loaded: bool,
     preferred_model: Option<String>,
     pdf_id: Option<PdfId>,
     reading_position: Option<ReadingPosition>,
     translation_cache: CacheState,
     unsaved_translations: TranslationRows,
     translation_requested: bool,
+    auto_translate: bool,
     translation_total: usize,
     translation_preview: HashMap<usize, TranslatedText>,
     changed_translations: Vec<usize>,
@@ -242,6 +244,15 @@ pub struct Reader {
 
 impl Reader {
     pub fn new() -> Self {
+        Self::create(true, true)
+    }
+
+    /// A reader without a window: translation never starts on its own and model discovery is optional.
+    pub fn new_headless(discover_models: bool) -> Self {
+        Self::create(discover_models, false)
+    }
+
+    fn create(discover_models: bool, auto_translate: bool) -> Self {
         let (send, events) = mpsc::channel();
         let (render_jobs, jobs) = mpsc::channel::<RenderJob>();
         let render_events = send.clone();
@@ -269,14 +280,16 @@ impl Reader {
             translation_cache: CacheState::Pending, unsaved_translations: Vec::new(),
             translations: Vec::new(), translation_math: Vec::new(), translated_count: 0, translation_layout_reset: 0,
             translation_model: None, translation: None, translation_requested: false,
-            translation_total: 0, translation_preview: HashMap::new(), changed_translations: Vec::new(),
+            auto_translate, translation_total: 0, translation_preview: HashMap::new(), changed_translations: Vec::new(),
             translation_error: None, login_cancel: None, login_url: None,
-            credits: DocumentCredits::default(),
+            credits: DocumentCredits::default(), credits_loaded: false,
             images: HashMap::new(), image_bytes: 0,
             image_use: 0, failed_images: HashMap::new(), requested_images: HashSet::new(),
             render_jobs, send, events,
         };
-        reader.refresh_models();
+        if discover_models {
+            reader.refresh_models();
+        }
         reader
     }
 
@@ -288,6 +301,7 @@ impl Reader {
         self.document = None;
         self.pdf_id = None;
         self.credits = DocumentCredits::default();
+        self.credits_loaded = false;
         self.reading_position = None;
         self.citation_links.clear();
         self.reference_links.clear();
@@ -298,7 +312,7 @@ impl Reader {
         self.translation_math.clear();
         self.reset_translations();
         self.translation_total = 0;
-        self.translation_requested = self.preferred_model.is_some();
+        self.translation_requested = self.auto_translate && self.preferred_model.is_some();
         self.translation_error = None;
         self.images.clear();
         self.image_bytes = 0;
@@ -380,6 +394,30 @@ impl Reader {
 
     pub fn has_pending_translation(&self) -> bool {
         self.translated_count < self.translation_total || !self.unsaved_translations.is_empty()
+    }
+
+    pub fn cache_ready(&self) -> bool {
+        matches!(self.translation_cache, CacheState::Ready(_) | CacheState::Failed)
+    }
+
+    pub fn models_settled(&self) -> bool {
+        !self.checking_models
+    }
+
+    pub fn translatable_count(&self) -> usize {
+        self.translation_total
+    }
+
+    pub fn credits_loaded(&self) -> bool {
+        self.credits_loaded
+    }
+
+    pub fn preferred_model(&self) -> Option<&str> {
+        self.preferred_model.as_deref()
+    }
+
+    pub fn load_cached_translations(&mut self) {
+        self.load_translation_cache();
     }
 
     pub fn take_changed_translations(&mut self) -> Vec<usize> {
@@ -601,6 +639,8 @@ impl Reader {
                                 thread::spawn(move || {
                                     let _ = send.send(Event::CreditsLoaded(generation, document_credits::load(pdf_id)));
                                 });
+                            } else {
+                                self.credits_loaded = true;
                             }
                             self.reading_position = reading_position;
                             self.translations.resize(document.blocks.len(), None);
@@ -700,6 +740,7 @@ impl Reader {
                 }
                 Event::CreditsLoaded(generation, history) if generation == self.generation => {
                     self.credits.merge(history);
+                    self.credits_loaded = true;
                 }
                 Event::CreditsRecorded { pdf_id, key, usage } if Some(pdf_id) == self.pdf_id => {
                     self.credits.record(key, usage);
@@ -794,7 +835,7 @@ pub fn is_translatable(kind: BlockKind) -> bool {
     matches!(kind, BlockKind::Title | BlockKind::Heading | BlockKind::Paragraph | BlockKind::Caption | BlockKind::Reference)
 }
 
-fn translation_source(document: &Document, index: usize) -> Option<(TranslationStyle, &str)> {
+pub(crate) fn translation_source(document: &Document, index: usize) -> Option<(TranslationStyle, &str)> {
     let block = document.blocks.get(index)?;
     if !is_translatable(block.kind) {
         return None;

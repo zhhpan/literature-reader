@@ -1,0 +1,15 @@
+schema = 1
+id = "literature-reader"
+name = "文献阅读器"
+version = "0.1.0"
+description = "在 Tern 中阅读双语学术 PDF：原文、机器翻译、图表与原文页对照。"
+icon = "newspaper"
+host = "host.luau"
+window = "window.luau"
+styles = ["styles.css"]
+
+[[blocks]]
+id = "reader"
+title = "文献阅读器"
+icon = "newspaper"
+files = ["*.pdf"]

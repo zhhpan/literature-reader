@@ -10,6 +10,20 @@
 4. 点正文区块的引用可跳转到对应的文末条目。带 DOI 或来源网址的条目可以打开论文出处。
 5. 阅读位置会自动保存在本机。下次打开内容相同的 PDF 时，双语视图会回到上次读到的段落，原页视图会恢复到上次的页码和页内位置。
 
+## Tern 插件
+
+仓库内的 `plugins/literature-reader` 是 [Tern](https://docs.stencil.so/tern/) 原生插件：在 Tern 标签页中以区块显示同一份双语正文、图表和 PDF 原页，不改变桌面阅读器。
+
+```sh
+# 从 GitHub 安装（推荐）
+tern plugin install github.com/zhhpan/literature-reader/plugins/literature-reader
+
+# 开发时链接本地目录
+tern plugin link plugins/literature-reader
+```
+
+安装后在命令面板使用「文献阅读器：打开标签页」「文献阅读器：打开 PDF…」「文献阅读器：登录 CodeBuddy」「文献阅读器：设置可执行文件…」和「文献阅读器：自动翻译开/关」。安装、可执行文件解析和已知限制见 [插件说明](plugins/literature-reader/README.md)。
+
 ## 更新
 
 Windows 启动时会在后台读取 GitHub Releases 的公开更新清单，也可以从底部状态栏手动「检查更新」。较早的发布可通过 GitHub API 查询。点「更新到」并确认一次后，阅读器会下载并校验安装包、保存阅读位置，按已有安装目录和选项安装。升级时直接复用通过 SHA-256 校验的 Node.js、Poppler 和翻译 SDK，成功后重新打开阅读器。

@@ -1,0 +1,273 @@
+/* 文献阅读器 — theme-neutral reading view.
+   Colours come from currentColor and Tern's theme variables; nothing here
+   is tied to light or dark. */
+
+[data-surface='plugin.literature-reader.reader'].sf-main,
+[data-surface='plugin.literature-reader.reader'].sf-dock {
+	background: var(--tv-bg);
+}
+
+[data-surface='plugin.literature-reader.reader'].sf-main {
+	padding: 24px 28px 40px;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-doc {
+	width: 100%;
+	max-width: 74ch;
+	margin: 0 auto;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-doc > :first-child {
+	margin-top: 0;
+}
+
+/* Title block */
+[data-surface='plugin.literature-reader.reader'] .lr-title {
+	margin: 0.2em 0 0.3em;
+	text-align: center;
+	font-size: 1.55em;
+	font-weight: 650;
+	line-height: 1.3;
+	letter-spacing: -0.012em;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-title-zh {
+	margin: 0 0 0.5em;
+	padding: 0;
+	text-align: center;
+	opacity: 0.78;
+	font-size: 0.98em;
+	line-height: 1.6;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-author {
+	margin: 0 0 2em;
+	text-align: center;
+	opacity: 0.6;
+	font-size: 0.9em;
+	line-height: 1.6;
+}
+
+/* Sections */
+[data-surface='plugin.literature-reader.reader'] .lr-heading {
+	margin: 2.1em 0 0.55em;
+	font-size: 1.16em;
+	font-weight: 650;
+	line-height: 1.4;
+	letter-spacing: -0.006em;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-heading-zh {
+	margin: 0 0 1em;
+	padding-left: 0.9em;
+	font-size: 0.98em;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-reference-heading {
+	margin-top: 2.6em;
+	padding-top: 1.4em;
+	border-top: 1px solid var(--l2);
+	font-size: 1.05em;
+}
+
+/* Prose */
+[data-surface='plugin.literature-reader.reader'] .lr-body {
+	margin: 0 0 0.7em;
+	font-size: 1em;
+	line-height: 1.75;
+	text-align: left;
+	overflow-wrap: break-word;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-body.lr-item {
+	margin-bottom: 0.35em;
+}
+
+/* Markdown is only used for paragraphs with inline formulas; its own
+   paragraph margins must not double the block spacing. */
+[data-surface='plugin.literature-reader.reader'] .lr-md .md,
+[data-surface='plugin.literature-reader.reader'] .lr-md .md > :first-child {
+	margin-top: 0;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-md .md p {
+	margin: 0;
+	line-height: inherit;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-md .md {
+	font: inherit;
+	line-height: inherit;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-md .math,
+[data-surface='plugin.literature-reader.reader'] .lr-md .math-display {
+	color: var(--t1);
+}
+
+/* Translations sit behind a quiet rule instead of dimming the whole run. */
+[data-surface='plugin.literature-reader.reader'] .lr-zh {
+	position: relative;
+	margin: 0.15em 0 1.05em;
+	padding: 0.05em 0 0.05em 0.9em;
+	border-left: 2px solid var(--l2);
+	opacity: 0.9;
+	line-height: 1.7;
+	overflow-wrap: break-word;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-zh.lr-item-zh {
+	margin-bottom: 0.5em;
+}
+
+/* Captions */
+[data-surface='plugin.literature-reader.reader'] .lr-caption {
+	margin: 0 0 0.6em;
+	font-size: 0.82em;
+	line-height: 1.6;
+	color: var(--t3);
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-caption.lr-zh {
+	margin: 0.15em 0 0.7em;
+	padding-left: 0.7em;
+	border-left: 1px solid var(--l2);
+	opacity: 0.85;
+}
+
+/* References */
+[data-surface='plugin.literature-reader.reader'] .lr-reference {
+	margin: 0 0 0.5em;
+	padding-left: 1.2em;
+	font-size: 0.88em;
+	line-height: 1.6;
+	overflow-wrap: break-word;
+}
+
+/* Formulas are typeset natively (math node), never shown as code. */
+[data-surface='plugin.literature-reader.reader'] .lr-equation {
+	margin: 1.1em 0 0.9em;
+	padding: 0.35em 0;
+	text-align: center;
+	overflow-x: auto;
+	overflow-y: hidden;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-equation .sf-math {
+	font-size: 1.1em;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-equation pre {
+	margin: 0;
+	padding: 0.6em 0.8em;
+	background: var(--code-bg);
+	border-radius: var(--r-chip);
+	font-family: var(--mono);
+	font-size: 0.9em;
+	line-height: 1.6;
+	white-space: pre-wrap;
+	text-align: left;
+	overflow-wrap: anywhere;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-equation-zh {
+	margin: -0.3em 0 1em;
+	font-size: 0.92em;
+}
+
+/* Figures and tables: one card per asset, caption inside the card. */
+[data-surface='plugin.literature-reader.reader'] .lr-asset {
+	margin: 1.4em 0;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-asset .sf-image[data-role='figure'] {
+	max-width: 100%;
+	margin: 0 auto;
+	padding: 8px;
+	background: var(--card);
+	border: 1px solid var(--l2);
+	border-radius: var(--r-card);
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-asset .sf-image[data-role='figure'] .sf-img-frame {
+	max-width: 100%;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-asset .lr-caption {
+	margin: 0.55em 0 0;
+	padding: 0;
+	border: 0;
+	text-align: left;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-asset .lr-caption.lr-zh {
+	margin: 0.2em 0 0;
+	padding-left: 0.7em;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-figure-missing {
+	margin: 0.4em 0;
+	padding: 18px 12px;
+	border: 1px dashed var(--l3);
+	border-radius: var(--r-card);
+	opacity: 0.5;
+	font-size: 0.85em;
+	text-align: center;
+}
+
+/* Original page mode */
+[data-surface='plugin.literature-reader.reader'] .lr-page {
+	width: 100%;
+	max-width: 100%;
+	margin: 0 auto;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-page .sf-image {
+	max-width: 100%;
+	margin: 0.7em auto 0;
+}
+
+[data-surface='plugin.literature-reader.reader'] .sf-image[data-role='page'] .sf-img-frame {
+	max-width: 100%;
+	height: auto;
+}
+
+/* Notices and small text */
+[data-surface='plugin.literature-reader.reader'] .lr-notices {
+	margin: 2em 0 0;
+	font-size: 0.78em;
+	line-height: 1.55;
+	opacity: 0.5;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-hint {
+	margin: 0.3em 0 0.8em;
+	font-size: 0.86em;
+	line-height: 1.6;
+	opacity: 0.62;
+}
+
+[data-surface='plugin.literature-reader.reader'] .lr-error-text {
+	margin: 0 0 0.7em;
+	color: var(--bad);
+	font-size: 0.9em;
+	line-height: 1.6;
+	white-space: pre-wrap;
+}
+
+/* Dock: a quiet toolbar, not a second paragraph of status. */
+[data-surface='plugin.literature-reader.reader'].sf-dock {
+	padding: 8px 12px 10px;
+	background: var(--card);
+	border-top: 1px solid var(--l2);
+}
+
+[data-surface='plugin.literature-reader.reader'].sf-dock .sf-text[data-role='lr-status'] {
+	font-size: 0.78em;
+	line-height: 1.5;
+	opacity: 0.7;
+}
+
+[data-surface='plugin.literature-reader.reader'].sf-dock .sf-progress {
+	margin-top: 4px;
+}

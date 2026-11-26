@@ -1585,7 +1585,16 @@ fn add_assets(page: &Page, blocks: &mut Vec<Block>, columns: &PageColumns, image
         let Some(is_figure) = caption_type(&caption.text) else { continue; };
         let mark = caption.bounds;
         let region = if is_figure {
+            // A diagram drawn as vector strokes and text (a table of namespaces,
+            // say) has no raster and no prose-free gap above the caption; its
+            // grid still identifies the region. When a raster sits by the
+            // caption, the vector heuristic is not needed and could overreach.
+            let raster_near = rasters.iter().any(|raster| {
+                mark.overlap_x(*raster) > 20.0
+                    && (-3.0..65.0).contains(&(mark.top - raster.bottom))
+            });
             vector_figure(page, blocks, mark, columns)
+                .or_else(|| if raster_near { None } else { table_region(page, mark, columns, &assets) })
         } else {
             table_region(page, mark, columns, &assets)
         };

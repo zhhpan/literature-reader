@@ -15,6 +15,7 @@ mod reader;
 mod reading_position;
 mod recent_documents;
 mod runtime;
+mod tern;
 mod translation;
 mod translation_cache;
 #[cfg(windows)]
@@ -27,6 +28,12 @@ mod ui_wayland;
 mod wayland_update;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--tern") {
+        let status = tern::run();
+        #[cfg(target_os = "linux")]
+        translation::shutdown_bridges();
+        std::process::exit(status);
+    }
     #[cfg(windows)]
     ui::run();
     #[cfg(target_os = "linux")]
