@@ -192,10 +192,17 @@ pub fn render_page(path: &Path, page: usize, dpi: u32) -> Result<Vec<u8>, String
     render(path, page, dpi, None)
 }
 
-/// Renders the block's original appearance as binary RGB Portable Pixmap (P6) data.
-pub fn render_block(path: &Path, block: &Block, dpi: u32) -> Result<Vec<u8>, String> {
+/// Figure/table blocks ask the layout model for a tighter box when the image is
+/// actually needed. Missing model or failed detection keeps the heuristic box.
+pub fn render_block_refined(path: &Path, document: &Document, index: usize, dpi: u32) -> Result<Vec<u8>, String> {
+    let block = document.blocks.get(index).ok_or_else(|| "找不到该内容块".to_owned())?;
+    let bounds = if matches!(block.kind, BlockKind::Figure | BlockKind::Table) {
+        crate::layout::refine(path, document, index).unwrap_or(block.bounds)
+    } else {
+        block.bounds
+    };
     let padding = if matches!(block.kind, BlockKind::Figure | BlockKind::Table) { 1.0 } else { 4.0 };
-    render(path, block.page, dpi, Some((block.bounds, padding)))
+    render(path, block.page, dpi, Some((bounds, padding)))
 }
 
 fn render(path: &Path, page: usize, dpi: u32, crop: Option<(Bounds, f32)>) -> Result<Vec<u8>, String> {

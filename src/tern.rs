@@ -286,8 +286,7 @@ fn image(pdf: &str, kind: &str, value: &str, out: &Path) -> i32 {
         "block" => {
             let Ok(index) = value.parse::<usize>() else { return usage() };
             pdf::extract(path).and_then(|document| {
-                let block = document.blocks.get(index).ok_or_else(|| "找不到该内容块".to_owned())?;
-                pdf::render_block(path, block, 155).and_then(|ppm| Raster::decode(&ppm))
+                pdf::render_block_refined(path, &document, index, 155).and_then(|ppm| Raster::decode(&ppm))
             })
         }
         _ => return usage(),

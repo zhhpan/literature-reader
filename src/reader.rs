@@ -266,7 +266,7 @@ impl Reader {
             for job in jobs {
                 let raster = match job.key {
                     ImageKey::Page(page) => pdf::render_page(&job.path, page, 135),
-                    ImageKey::Block(index) => pdf::render_block(&job.path, &job.document.blocks[index], 155),
+                    ImageKey::Block(index) => pdf::render_block_refined(&job.path, &job.document, index, 155),
                 };
                 let result = raster.and_then(|bytes| Raster::decode(&bytes));
                 if render_events.send(Event::Rendered(job.generation, job.key, result)).is_err() {
