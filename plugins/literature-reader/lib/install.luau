@@ -11,6 +11,10 @@ local DEFAULT_MANIFEST =
 	"https://github.com/zhhpan/literature-reader/releases/latest/download/literature-reader-tern.json"
 local DEFAULT_LAYOUT =
 	"https://github.com/zhhpan/literature-reader/releases/latest/download/literature-reader-tern-layout.json"
+local GITEE_BACKEND =
+	"https://gitee.com/zhhpan/literature-reader/raw/master/gitee-tern-backend-win-x64.json"
+local GITEE_LAYOUT =
+	"https://gitee.com/zhhpan/literature-reader/raw/master/gitee-tern-layout-win-x64.json"
 
 local function manifestUrl()
 	local configured = nil
@@ -22,19 +26,19 @@ local function manifestUrl()
 	if type(fromEnv) == "string" and fromEnv ~= "" then
 		configured = fromEnv
 	end
-	return configured or DEFAULT_MANIFEST
+	return configured and { configured } or { GITEE_BACKEND, DEFAULT_MANIFEST }
 end
 
 local function layoutManifestUrl()
 	local ok, value = pcall(tern.kv.get, "layout_url")
 	if ok and type(value) == "string" and value ~= "" then
-		return value
+		return { value }
 	end
 	local fromEnv = tern.getenv("LITERATURE_READER_LAYOUT_URL")
 	if type(fromEnv) == "string" and fromEnv ~= "" then
-		return fromEnv
+		return { fromEnv }
 	end
-	return DEFAULT_LAYOUT
+	return { GITEE_LAYOUT, DEFAULT_LAYOUT }
 end
 
 local function alive(pane)
@@ -44,6 +48,26 @@ local function alive(pane)
 		end
 	end
 	return false
+end
+
+local function fetchFirst(urls, callback)
+	local index = 1
+	local function next()
+		if index > #urls then
+			callback(nil)
+			return
+		end
+		local url = urls[index]
+		index = index + 1
+		tern.fetch(url, { timeout_ms = 20000 }, function(result)
+			if result.error or result.status ~= 200 then
+				next()
+			else
+				callback(result.body)
+			end
+		end)
+	end
+	next()
 end
 
 local function validUrl(url)
@@ -78,7 +102,7 @@ local function fail(cx, state, message)
 	state.backend = {
 		state = "error",
 		error = message,
-		url = manifestUrl(),
+		url = GITEE_BACKEND,
 	}
 	cx:render()
 end
@@ -285,17 +309,17 @@ function M.ensureLayout(cx, state, done)
 	state.layoutJob = true
 	state.layoutMessage = "正在准备图表增强…"
 	cx:render()
-	tern.fetch(layoutManifestUrl(), { timeout_ms = 20000 }, function(result)
+	fetchFirst(layoutManifestUrl(), function(body)
 		if not alive(cx.pane) then
 			return
 		end
-		if result.error or result.status ~= 200 then
+		if not body then
 			state.layoutJob = false
 			state.layoutError = "图表增强清单不可用。"
 			done()
 			return
 		end
-		local entry = util.decode(result.body)
+		local entry = util.decode(body)
 		if type(entry) ~= "table" or not validUrl(entry.url) or not validHash(entry.sha256) then
 			state.layoutJob = false
 			state.layoutError = "图表增强清单无效。"
@@ -323,15 +347,15 @@ function M.ensure(cx, state, done)
 	end
 	state.backend = { state = "manifest", message = "正在准备阅读内核…" }
 	cx:render()
-	tern.fetch(manifestUrl(), { timeout_ms = 20000 }, function(result)
+	fetchFirst(manifestUrl(), function(body)
 		if not alive(cx.pane) then
 			return
 		end
-		if result.error or result.status ~= 200 then
-			fail(cx, state, "无法读取阅读内核清单：" .. tostring(result.error or result.status))
+		if not body then
+			fail(cx, state, "无法读取阅读内核清单。")
 			return
 		end
-		local entry = util.decode(result.body)
+		local entry = util.decode(body)
 		if type(entry) ~= "table" or not validUrl(entry.url) or not validHash(entry.sha256) then
 			fail(cx, state, "阅读内核清单无效。")
 			return

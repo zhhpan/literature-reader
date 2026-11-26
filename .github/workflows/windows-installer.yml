@@ -438,7 +438,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download $env:GITHUB_REF_NAME --pattern "LiteratureReader-Setup-*-x64.exe" --dir gitee-assets --clobber
+          gh release download $env:GITHUB_REF_NAME --dir gitee-assets --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install --quiet requests
 

@@ -64,18 +64,33 @@ def main() -> int:
     release_id = release.json()["id"]
 
     uploaded = {}
-    for name, path, size in parts:
+
+    def upload(name: str, path: Path) -> dict:
         with path.open("rb") as handle:
-            upload = session.post(f"{api}/releases/{release_id}/attach_files",
-                                  params={"access_token": args.token},
-                                  files={"file": (name, handle)}, timeout=600)
-        if upload.status_code not in (200, 201):
-            fail(f"could not upload {name}: {upload.status_code} {upload.text[:300]}")
-        body = upload.json()
+            response = session.post(f"{api}/releases/{release_id}/attach_files",
+                                    params={"access_token": args.token},
+                                    files={"file": (name, handle)}, timeout=900)
+        if response.status_code not in (200, 201):
+            fail(f"could not upload {name}: {response.status_code} {response.text[:300]}")
+        body = response.json()
         if not body.get("browser_download_url"):
             fail(f"Gitee did not return a download URL for {name}")
         uploaded[name] = body
-        print(f"uploaded {name} ({size} bytes)")
+        print(f"uploaded {name} ({path.stat().st_size} bytes)")
+        return body
+
+    for name, path, _ in parts:
+        upload(name, path)
+
+    # Wayland, Tern backend/layout and their manifests all fit under 100 MB.
+    skipped = {installer.name, "reader-update.json"}
+    others = [path for path in sorted(args.assets.iterdir())
+              if path.is_file() and path.name not in skipped
+              and ".part" not in path.name and not path.name.startswith("gitee-")]
+    for path in others:
+        if path.stat().st_size >= 100 * 1024 * 1024:
+            fail(f"{path.name} exceeds Gitee's 100 MB attachment limit")
+        upload(path.name, path)
 
     manifest = {
         "tag_name": args.tag,
@@ -98,12 +113,33 @@ def main() -> int:
     (root / "gitee-update.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
     print(f"wrote {root / 'gitee-update.json'}")
 
+    def asset_manifest(name: str, version: str) -> None:
+        path = args.assets / name
+        if not path.is_file() or name not in uploaded:
+            return
+        payload = {
+            "schema": 1,
+            "version": version,
+            "platform": "win32-x64",
+            "url": uploaded[name]["browser_download_url"],
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+        stem = name.removeprefix("literature-reader-").removesuffix(".zip")
+        (root / f"gitee-{stem}.json").write_text(
+            json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+        print(f"wrote gitee-{stem}.json")
+
+    asset_manifest("literature-reader-tern-backend-win-x64.zip", version)
+    asset_manifest("literature-reader-tern-layout-win-x64.zip", version)
+
     token = args.token
     gitee_url = f"https://oauth2:{token}@gitee.com/{args.repo}.git"
     subprocess.run(["git", "-C", str(root), "push", "--force", gitee_url,
                     "HEAD:refs/heads/main", "HEAD:refs/heads/master", f"refs/tags/{args.tag}:refs/tags/{args.tag}"],
                    check=True)
-    subprocess.run(["git", "-C", str(root), "add", "gitee-update.json"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "gitee-update.json",
+                    "gitee-tern-backend-win-x64.json", "gitee-tern-layout-win-x64.json"], check=True)
     if subprocess.run(["git", "-C", str(root), "diff", "--cached", "--quiet"]).returncode != 0:
         subprocess.run(["git", "-C", str(root), "-c", "user.name=github-actions[bot]",
                         "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
