@@ -16,7 +16,11 @@ use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWN
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO: &str = "zhhpan/literature-reader";
+const GITEE_REPO: &str = "zhhpan/literature-reader";
 const MANIFEST_FILE: &str = "reader-update.json";
+/// Gitee is checked first; it mirrors releases from the same tag and carries
+/// its own manifest so downloads stay on Gitee when it has the version.
+const GITEE_MANIFEST: &str = "https://gitee.com/zhhpan/literature-reader/raw/master/gitee-update.json";
 const ASSET_PREFIX: &str = "LiteratureReader-Setup-";
 const ASSET_SUFFIX: &str = "-x64.exe";
 const MAX_RELEASE_JSON: u64 = 1024 * 1024;
@@ -57,18 +61,91 @@ struct Asset {
 pub fn check() -> Result<Option<Release>, String> {
     let current = version(CURRENT_VERSION).expect("package version is numeric");
     remove_old_downloads(current);
-    let manifest_error = match latest_manifest() {
-        Ok(Some(info)) => match newer_release(info, current) {
-            Ok(release) => return Ok(release),
-            Err(error) => Some(error),
+    let mut errors = Vec::new();
+    match latest_gitee_manifest() {
+        Ok(Some(info)) => match newer_gitee_release(info, current) {
+            Ok(Some(release)) => return Ok(Some(release)),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
         },
-        Ok(None) => None,
-        Err(error) => Some(error),
-    };
-    latest_api(current).map_err(|error| match manifest_error {
-        Some(manifest) => format!("更新清单读取失败。{manifest} {error}"),
-        None => error,
+        Ok(None) => {}
+        Err(error) => errors.push(error),
+    }
+    match latest_manifest() {
+        Ok(Some(info)) => match newer_release(info, current) {
+            Ok(Some(release)) => return Ok(Some(release)),
+            Ok(None) => {}
+            Err(error) => errors.push(error),
+        },
+        Ok(None) => {}
+        Err(error) => errors.push(error),
+    }
+    latest_api(current).map_err(|error| {
+        if errors.is_empty() {
+            error
+        } else {
+            format!("{} {error}", errors.join(" "))
+        }
     })
+}
+
+fn latest_gitee_manifest() -> Result<Option<ReleaseInfo>, String> {
+    let mut url = Url::parse(GITEE_MANIFEST).expect("static Gitee manifest URL");
+    for _ in 0..=3 {
+        let response = http::get(&url, false).map_err(|error| format!("无法读取 Gitee 更新清单：{error}"))?;
+        match response.status {
+            200 => {
+                let info = read_release(response)?;
+                if info.draft || info.prerelease {
+                    return Ok(None);
+                }
+                return Ok(Some(info));
+            }
+            404 => return Ok(None),
+            301 | 302 | 303 | 307 | 308 => {
+                url = response.location.as_deref().and_then(|location| url.join(location).ok())
+                    .filter(allowed_gitee_manifest_redirect)
+                    .ok_or_else(|| "Gitee 返回了无法确认的更新清单地址。".to_owned())?;
+            }
+            status => return Err(format!("Gitee 更新清单返回 HTTP {status}。")),
+        }
+    }
+    Err("Gitee 更新清单重定向次数过多。".into())
+}
+
+fn allowed_gitee_manifest_redirect(url: &Url) -> bool {
+    safe_download_url(url) && matches!(url.host_str(), Some("gitee.com" | "raw.giteeusercontent.com"))
+}
+
+fn gitee_download_url(url: &Url, tag: &str, name: &str) -> bool {
+    safe_download_url(url)
+        && url.host_str() == Some("gitee.com")
+        && url.path() == format!("/{GITEE_REPO}/releases/download/{tag}/{name}")
+}
+
+fn newer_gitee_release(info: ReleaseInfo, current: [u32; 3]) -> Result<Option<Release>, String> {
+    if info.draft || info.prerelease {
+        return Ok(None);
+    }
+    let (number, parsed) = info.tag_name.strip_prefix('v')
+        .and_then(|number| version(number).map(|parsed| (number, parsed)))
+        .ok_or_else(|| "Gitee 正式版本号不符合 v主版本.次版本.修订号 格式。".to_owned())?;
+    if parsed <= current {
+        return Ok(None);
+    }
+    let name = asset_name(number);
+    let asset = info.assets.into_iter().find(|asset| asset.name == name && asset.state == "uploaded")
+        .ok_or_else(|| "Gitee 新版还没有可用的 Windows x64 安装包。".to_owned())?;
+    let url = Url::parse(&asset.browser_download_url)
+        .map_err(|_| "Gitee 安装包的下载地址无效。".to_owned())?;
+    if !gitee_download_url(&url, &info.tag_name, &name) || !(1..=MAX_INSTALLER_BYTES).contains(&asset.size) {
+        return Err("Gitee 新版安装包的下载地址或大小不符合要求。".into());
+    }
+    let digest = asset.digest.as_deref().and_then(parse_digest)
+        .ok_or_else(|| "Gitee 未提供新版安装包的 SHA-256 校验值。".to_owned())?;
+    Ok(Some(Release {
+        version: number.to_owned(), size: asset.size, url, digest,
+    }))
 }
 
 fn latest_manifest() -> Result<Option<ReleaseInfo>, String> {
@@ -217,7 +294,14 @@ fn asset_response(url: &Url) -> Result<http::Response, String> {
 }
 
 fn allowed_asset_redirect(url: &Url) -> bool {
-    safe_download_url(url) && url.host_str() == Some("release-assets.githubusercontent.com")
+    if !safe_download_url(url) {
+        return false;
+    }
+    match url.host_str() {
+        Some("release-assets.githubusercontent.com") => true,
+        Some("gitee.com" | "file.gitee.com" | "raw.giteeusercontent.com") => true,
+        _ => false,
+    }
 }
 
 fn safe_download_url(url: &Url) -> bool {
@@ -365,6 +449,25 @@ mod tests {
         unknown.assets[0].digest = None;
         assert!(newer_release(unknown, [0, 1, 2]).is_err());
         assert!(version("0.01.2").is_none());
+    }
+
+    #[test]
+    fn accepts_only_gitee_release_assets() {
+        let mut info = release_info();
+        info.tag_name = "v0.2.0".into();
+        info.assets[0].name = asset_name("0.2.0");
+        info.assets[0].browser_download_url = format!(
+            "https://gitee.com/{GITEE_REPO}/releases/download/v0.2.0/{}", asset_name("0.2.0"));
+        let release = newer_gitee_release(info, [0, 1, 2]).unwrap().unwrap();
+        assert_eq!(release.version, "0.2.0");
+        assert_eq!(release.url.host_str(), Some("gitee.com"));
+
+        let mut wrong = release_info();
+        wrong.tag_name = "v0.2.0".into();
+        wrong.assets[0].name = asset_name("0.2.0");
+        wrong.assets[0].browser_download_url = format!(
+            "https://gitee.com/other/literature-reader/releases/download/v0.2.0/{}", asset_name("0.2.0"));
+        assert!(newer_gitee_release(wrong, [0, 1, 2]).is_err());
     }
 
     #[test]
