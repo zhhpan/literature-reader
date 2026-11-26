@@ -21,6 +21,34 @@ local function alive(pane)
 	return false
 end
 
+local function dirname(path)
+	return string.match(path, "^(.*)[\\/][^\\/]*$") or path
+end
+
+local function joinPath(directory, name)
+	local last = string.sub(directory, -1)
+	if last == "/" or last == "\\" then
+		return directory .. name
+	end
+	return directory .. "/" .. name
+end
+
+-- Same-folder PDFs make re-opening a document possible without the palette.
+local function pdfFiles(directory)
+	local ok, entries = pcall(tern.fs.list, directory)
+	if not ok or type(entries) ~= "table" then
+		return {}
+	end
+	local files = {}
+	for _, name in ipairs(entries) do
+		if type(name) == "string" and string.match(string.lower(name), "%.pdf$") then
+			table.insert(files, joinPath(directory, name))
+		end
+	end
+	table.sort(files)
+	return files
+end
+
 local function setError(state, message)
 	if state.snapshot then
 		state.jobError = message
@@ -444,6 +472,7 @@ function R.loadDocument(cx, state)
 		-- A saved block can outlive a deleted or moved PDF. Show the recent
 		-- list instead of blaming the backend for a missing file.
 		state.missingPath = state.path
+		state.folderPdfs = pdfFiles(dirname(state.path))
 		state.path = nil
 		state.snapshot = nil
 		state.loading = false
@@ -536,6 +565,7 @@ function R.openDocument(cx, state, path)
 	end
 	state.path = path
 	state.missingPath = nil
+	state.showOpen = false
 	state.page = 1
 	state.showModels = false
 	state.images = {}
@@ -720,6 +750,8 @@ local reader = {
 			loginPayload = nil,
 			loginError = nil,
 			autoStarted = false,
+			showOpen = false,
+			folderPdfs = {},
 			model = nil,
 			statePath = dir .. "/state.json",
 			modelsPath = dir .. "/models.json",
@@ -855,6 +887,16 @@ local reader = {
 			end
 		elseif act == "open" then
 			R.openDocument(cx, state, value)
+		elseif act == "open-panel" then
+			state.showOpen = not state.showOpen
+			if state.showOpen then
+				local base = state.path or state.missingPath
+				state.folderPdfs = base and pdfFiles(dirname(base)) or {}
+				if not state.recent and not state.recentLoading then
+					R.loadRecent(cx, state)
+				end
+			end
+			cx:render()
 		elseif act == "dismiss-missing" then
 			state.missingPath = nil
 			cx:render()

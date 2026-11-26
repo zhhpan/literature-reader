@@ -4,6 +4,15 @@ local tern = require("tern")
 
 local BLOCK = "literature-reader.reader"
 
+-- PDFs open in the reader from the Files pane, the palette, drag-and-drop,
+-- links and `tern open`; the built-in PDF block is not the primary view.
+tern.route.open(function(req, _cx)
+	if type(req.path) == "string" and string.match(string.lower(req.path), "%.pdf$") then
+		return { block = BLOCK, args = { req.path } }
+	end
+	return nil
+end)
+
 tern.command({
 	id = "open",
 	title = "文献阅读器：打开标签页",

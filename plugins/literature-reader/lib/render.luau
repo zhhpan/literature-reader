@@ -346,6 +346,74 @@ function M.document(state)
 	return ui.col({ el("div", { class = "lr-doc" }, out) })
 end
 
+local function documentItems(documents)
+	local items = {}
+	for i, document in ipairs(documents or {}) do
+		if type(document.path) == "string" then
+			table.insert(items, ui.node("item", {
+				key = tostring(i),
+				label = document.title or util.basename(document.path),
+				detail = document.path,
+				icon = "file-pdf",
+				actions = { click = "open=" .. document.path },
+			}))
+		end
+	end
+	return items
+end
+
+local function itemsNode(items, key)
+	if #items == 0 then
+		return nil
+	end
+	local listNode = ui.node("list", { key = key }, items)
+	if #items > 8 then
+		return ui.node("scroll", { key = key .. "-scroll", max = { h = "8lines" }, bar = "auto" }, { listNode })
+	end
+	return listNode
+end
+
+function M.openCard(state)
+	local children = {}
+	add(children, el("p", { class = "lr-hint", text = "最近阅读" }))
+	local recent = state.recent and state.recent.documents
+	if state.recentLoading and not recent then
+		add(children, el("p", { class = "lr-hint", text = "正在读取最近文献…" }))
+	elseif state.recentError then
+		add(children, el("p", { class = "lr-error-text", text = state.recentError }))
+	end
+	local recentItems = documentItems(recent)
+	add(children, itemsNode(recentItems, "open-recent"))
+	if #recentItems == 0 and not state.recentLoading then
+		add(children, el("p", { class = "lr-hint", text = "还没有最近阅读的文献。" }))
+	end
+
+	local folder = state.folderPdfs or {}
+	if #folder > 0 then
+		add(children, el("p", { class = "lr-hint", text = "同目录的 PDF" }))
+		local items = {}
+		for i, path in ipairs(folder) do
+			table.insert(items, ui.node("item", {
+				key = tostring(i),
+				label = util.basename(path),
+				detail = path,
+				icon = "file-pdf",
+				actions = { click = "open=" .. path },
+			}))
+		end
+		add(children, itemsNode(items, "open-folder"))
+	end
+
+	add(children, el("p", {
+		class = "lr-hint",
+		text = "在文件窗格里双击 PDF 会直接用文献阅读器打开；也可以运行命令面板的「文献阅读器：打开 PDF…」。",
+	}))
+	add(children, ui.node("row", { gap = "xs", wrap = true }, {
+		ui.button("关闭", { size = "sm", variant = "quiet", actions = { click = "open-panel" } }),
+	}))
+	return ui.card({ ui.span("打开文献", "strong") }, children, { key = "open", icon = "folder" })
+end
+
 function M.recent(state)
 	local children = {}
 	local recent = state.recent
@@ -354,30 +422,7 @@ function M.recent(state)
 	elseif state.recentError then
 		add(children, el("p", { class = "lr-error-text", text = state.recentError }))
 	elseif recent and type(recent.documents) == "table" and #recent.documents > 0 then
-		local items = {}
-		for i, document in ipairs(recent.documents) do
-			if type(document.path) == "string" then
-				table.insert(items, ui.node("item", {
-					key = tostring(i),
-					label = document.title or util.basename(document.path),
-					detail = document.path,
-					icon = "file-pdf",
-					actions = { click = "open=" .. document.path },
-				}))
-			end
-		end
-		if #items > 0 then
-			local listNode = ui.node("list", { key = "list" }, items)
-			if #items > 8 then
-				table.insert(children, ui.node("scroll", {
-					key = "recent-scroll",
-					max = { h = "8lines" },
-					bar = "auto",
-				}, { listNode }))
-			else
-				table.insert(children, listNode)
-			end
-		end
+		add(children, itemsNode(documentItems(recent.documents), "recent"))
 	else
 		add(children, el("p", { class = "lr-hint", text = "还没有最近阅读的文献。" }))
 	end
@@ -424,18 +469,34 @@ function M.errorCard(state)
 end
 
 function M.missingCard(state)
-	return ui.card({ ui.span("上次的文献不存在", "warning strong") }, {
+	local children = {
 		el("p", { class = "lr-error-text", text = tostring(state.missingPath or "") }),
 		el("p", {
 			class = "lr-hint",
-			text = "文件可能已被移动或删除。从下面的最近阅读重新选择，或用「打开 PDF…」打开。",
+			text = "文件可能已被移动或删除。从下面的最近阅读或同目录 PDF 重新选择。",
 		}),
-		ui.button("知道了", {
-			key = "dismiss-missing",
-			size = "sm",
-			actions = { click = "dismiss-missing" },
-		}),
-	}, { key = "missing", tone = "warning", icon = "warn" })
+	}
+	local folder = state.folderPdfs or {}
+	if #folder > 0 then
+		add(children, el("p", { class = "lr-hint", text = "同目录的 PDF" }))
+		local items = {}
+		for i, path in ipairs(folder) do
+			table.insert(items, ui.node("item", {
+				key = tostring(i),
+				label = util.basename(path),
+				detail = path,
+				icon = "file-pdf",
+				actions = { click = "open=" .. path },
+			}))
+		end
+		add(children, itemsNode(items, "missing-folder"))
+	end
+	add(children, ui.button("知道了", {
+		key = "dismiss-missing",
+		size = "sm",
+		actions = { click = "dismiss-missing" },
+	}))
+	return ui.card({ ui.span("上次的文献不存在", "warning strong") }, children, { key = "missing", tone = "warning", icon = "warn" })
 end
 
 function M.modelsCard(state)
@@ -629,6 +690,15 @@ function M.dock(state)
 	local running = state.job or (snapshot and snapshot.translation and snapshot.translation.state == "running")
 	local signedIn = state.models and state.models.signed_in == true
 	local row1 = {}
+	table.insert(row1, ui.button("打开", {
+		key = "open",
+		role = "lr-open",
+		size = "sm",
+		icon = "folder",
+		actions = { click = "open-panel" },
+		on = state.showOpen,
+		title = "打开文献（文件窗格双击 PDF 也可）",
+	}))
 	local name = modelName(state)
 	table.insert(row1, ui.badge(name or "未选择模型", name and "accent" or "muted"))
 
@@ -757,6 +827,9 @@ function M.view(state)
 
 	if state.missingPath then
 		table.insert(main, M.missingCard(state))
+	end
+	if state.showOpen then
+		table.insert(main, M.openCard(state))
 	end
 	local snapshot = state.snapshot
 	if state.backend and state.backend.state ~= "ready" then
