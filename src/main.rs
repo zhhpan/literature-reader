@@ -6,6 +6,7 @@ mod citations;
 mod digest;
 mod document_credits;
 mod hyphenation;
+mod layout;
 mod math;
 #[cfg(windows)]
 mod math_layout;
@@ -28,7 +29,11 @@ mod ui_wayland;
 mod wayland_update;
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--tern") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--layout-probe") {
+        std::process::exit(layout::probe(&args[2..]));
+    }
+    if args.get(1).map(String::as_str) == Some("--tern") {
         let status = tern::run();
         #[cfg(target_os = "linux")]
         translation::shutdown_bridges();

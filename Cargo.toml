@@ -16,6 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 url = "2"
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { package = "gtk4", version = "0.10", features = ["v4_8"] }
