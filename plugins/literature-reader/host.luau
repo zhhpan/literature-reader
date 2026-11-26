@@ -139,6 +139,17 @@ local function pumpImages(cx, state)
 				state.imageErrors[index] = message
 			end
 		end
+		if state.layoutResetPending then
+			state.layoutResetPending = false
+			state.images = {}
+			state.imageFailed = {}
+			state.imageErrors = {}
+			state.imageQueue = {}
+			state.imageBusy = false
+			queueImages(cx, state)
+			cx:render()
+			return
+		end
 		cx:render()
 		pumpImages(cx, state)
 	end)
@@ -170,6 +181,43 @@ local function queueImages(cx, state)
 		end
 	end
 	pumpImages(cx, state)
+end
+
+-- Layout assets are optional: request them when a document has figures/tables,
+-- keep reading on heuristic crops, and refresh images once they arrive.
+local function maybeLayout(cx, state)
+	if state.layoutRequested or install.layoutReady() or state.layoutError then
+		return
+	end
+	local snapshot = state.snapshot
+	local has_assets = false
+	for _, block in ipairs(snapshot and snapshot.blocks or {}) do
+		if block.asset then
+			has_assets = true
+			break
+		end
+	end
+	if not has_assets then
+		return
+	end
+	state.layoutRequested = true
+	install.ensureLayout(cx, state, function()
+		if not alive(cx.pane) then
+			return
+		end
+		if install.layoutReady() then
+			state.images = {}
+			state.imageFailed = {}
+			state.imageErrors = {}
+			state.imageQueue = {}
+			if state.imageBusy then
+				state.layoutResetPending = true
+			else
+				queueImages(cx, state)
+			end
+		end
+		cx:render()
+	end)
 end
 
 local function ensurePage(cx, state, requested)
@@ -529,6 +577,7 @@ function R.loadDocument(cx, state)
 			state.snapshot = value
 			state.loadError = nil
 			state.lastPayload = util.readText(out, STATE_CAP)
+			maybeLayout(cx, state)
 			clampPage(state)
 			queueImages(cx, state)
 			R.autoTranslate(cx, state)
@@ -750,6 +799,11 @@ local reader = {
 			loginPayload = nil,
 			loginError = nil,
 			autoStarted = false,
+			layoutRequested = false,
+			layoutJob = false,
+			layoutError = nil,
+			layoutMessage = nil,
+			layoutResetPending = false,
 			showOpen = false,
 			folderPdfs = {},
 			model = nil,

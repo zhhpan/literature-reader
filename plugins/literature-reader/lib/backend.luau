@@ -31,6 +31,12 @@ function M.bundleExe()
 	return join(M.bundleDir(), EXE_NAME)
 end
 
+-- The on-demand layout package carries a layout-capable backend under a
+-- separate name so it never replaces a locked executable in place.
+function M.layoutExe()
+	return join(M.bundleDir(), "literature-reader-layout.exe")
+end
+
 -- Resolution order. The bundled runtime is the normal path; kv/env are
 -- developer overrides, never a setup step.
 function M.candidates()
@@ -48,6 +54,7 @@ function M.candidates()
 		table.insert(list, { path = fromEnv, verify = true, source = "env" })
 	end
 
+	table.insert(list, { path = M.layoutExe(), verify = true, source = "layout" })
 	table.insert(list, { path = M.bundleExe(), verify = true, source = "bundle" })
 
 	local dir = tern.plugin.dir

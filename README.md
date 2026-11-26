@@ -23,7 +23,9 @@ tern plugin install github.com/zhhpan/literature-reader/plugins/literature-reade
 tern plugin link plugins/literature-reader
 ```
 
-安装后在命令面板使用「文献阅读器：打开标签页」「文献阅读器：打开 PDF…」「文献阅读器：登录 CodeBuddy」和「文献阅读器：自动翻译开/关」。插件自带运行时，首次打开自动下载精简后端，不需要安装桌面版或设置可执行程序。安装、可执行文件解析和已知限制见 [插件说明](plugins/literature-reader/README.md)。
+安装后在命令面板使用「文献阅读器：打开标签页」「文献阅读器：打开 PDF…」「文献阅读器：登录 CodeBuddy」和「文献阅读器：自动翻译开/关」。插件自带运行时，首次打开自动下载精简后端；打开含图表的文献时再按需下载约 80 MB 的版面增强（模型 + ONNX Runtime），失败则退回原有裁图。安装、下载和方法见 [插件说明](plugins/literature-reader/README.md)。
+
+桌面版安装包内置版面模型：图/表区域用 ONNX 版面检测精修，模型按需加载，空闲 60 秒后释放。默认 CPU（内存约 260 MB 峰值）；设置 `LITERATURE_READER_LAYOUT_GPU=1` 可启用 DirectML（约 300 ms/页，内存更高）。
 
 ## 更新
 

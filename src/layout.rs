@@ -5,8 +5,6 @@
 //! untouched until the regions are validated on real papers.
 
 use crate::pdf::{self, BlockKind, Bounds, Document};
-use crate::reader::Raster;
-use image::{Rgb, RgbImage};
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
@@ -59,6 +57,7 @@ fn prepare_dylibs() {
 fn cpu_session(path: &Path) -> Result<Session, String> {
     let builder = Session::builder().map_err(|error| format!("无法加载版面模型：{error}"))?;
     let mut builder = builder.with_intra_threads(8).map_err(|error| format!("无法配置版面模型：{error}"))?;
+    builder = builder.with_memory_pattern(false).map_err(|error| format!("无法配置版面模型：{error}"))?;
     builder.commit_from_file(path).map_err(|error| format!("无法加载版面模型：{error}"))
 }
 
@@ -66,6 +65,7 @@ fn cpu_session(path: &Path) -> Result<Session, String> {
 fn directml_session(path: &Path) -> Result<Session, String> {
     let builder = Session::builder().map_err(|error| format!("无法加载版面模型：{error}"))?;
     let builder = builder.with_intra_threads(4).map_err(|error| format!("无法配置版面模型：{error}"))?;
+    let builder = builder.with_memory_pattern(false).map_err(|error| format!("无法配置版面模型：{error}"))?;
     let builder = builder
         .with_execution_providers([ort::ep::DirectML::default().build()])
         .map_err(|error| format!("无法启用 DirectML：{error}"))?;
@@ -73,48 +73,111 @@ fn directml_session(path: &Path) -> Result<Session, String> {
     builder.commit_from_file(path).map_err(|error| format!("无法加载版面模型：{error}"))
 }
 
+fn ppm_rgb(ppm: &[u8]) -> Option<(usize, usize, &[u8])> {
+    if !ppm.starts_with(b"P6") {
+        return None;
+    }
+    let mut values = [0usize; 3];
+    let mut index = 2;
+    for value in &mut values {
+        loop {
+            while index < ppm.len() && ppm[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if index < ppm.len() && ppm[index] == b'#' {
+                while index < ppm.len() && ppm[index] != b'\n' {
+                    index += 1;
+                }
+                continue;
+            }
+            break;
+        }
+        let start = index;
+        while index < ppm.len() && ppm[index].is_ascii_digit() {
+            index += 1;
+        }
+        if start == index {
+            return None;
+        }
+        *value = std::str::from_utf8(&ppm[start..index]).ok()?.parse().ok()?;
+    }
+    if index >= ppm.len() || values[2] != 255 {
+        return None;
+    }
+    index += 1;
+    let (width, height) = (values[0], values[1]);
+    let bytes = width.checked_mul(height)?.checked_mul(3)?;
+    let data = ppm.get(index..index + bytes)?;
+    (width > 0 && height > 0).then_some((width, height, data))
+}
+
 impl LayoutModel {
     pub fn load(path: &Path) -> Result<Self, String> {
         prepare_dylibs();
         #[cfg(windows)]
-        let session = directml_session(path).or_else(|_| cpu_session(path))?;
+        let session = if std::env::var_os("LITERATURE_READER_LAYOUT_GPU").is_some() {
+            directml_session(path).or_else(|_| cpu_session(path))?
+        } else {
+            cpu_session(path)?
+        };
         #[cfg(not(windows))]
         let session = cpu_session(path)?;
         Ok(Self { session, stride: 32 })
     }
 
-    /// `raster` is the page at `dpi`; boxes come back in PDF points.
-    pub fn detect(&mut self, raster: &Raster, dpi: u32) -> Result<Vec<Region>, String> {
-        let width = raster.width.max(1) as u32;
-        let height = raster.height.max(1) as u32;
-        let mut rgb = RgbImage::new(width, height);
-        for (pixel, rgba) in rgb.pixels_mut().zip(raster.bgra.chunks_exact(4)) {
-            *pixel = Rgb([rgba[2], rgba[1], rgba[0]]);
+    /// `ppm` is the page render at `dpi`; boxes come back in PDF points.
+    pub fn detect(&mut self, ppm: &[u8], dpi: u32) -> Result<Vec<Region>, String> {
+        let Some((width, height, rgb)) = ppm_rgb(ppm) else {
+            return Err("页面图像不是有效的 P6 PPM".into());
+        };
+        // The export is trained at 1024; larger pages are downscaled to that
+        // square instead of scaling with the page height (memory and latency).
+        let target = ((height.min(768) / self.stride) * self.stride).max(self.stride);
+        if target == 0 {
+            return Err("页面尺寸无效".into());
         }
-
-        let target = (height as usize / self.stride) * self.stride;
         let gain = (target as f32 / height as f32).min(target as f32 / width as f32);
-        let resized_w = (width as f32 * gain).round().max(1.0) as u32;
-        let resized_h = (height as f32 * gain).round().max(1.0) as u32;
-        let resized = image::imageops::resize(&rgb, resized_w, resized_h, image::imageops::FilterType::Triangle);
-        let mut canvas = RgbImage::from_pixel(target as u32, target as u32, Rgb([114, 114, 114]));
-        let offset_x = (target as i32 - resized_w as i32) / 2;
-        let offset_y = (target as i32 - resized_h as i32) / 2;
-        image::imageops::overlay(&mut canvas, &resized, offset_x as i64, offset_y as i64);
-
+        let resized_w = ((width as f32 * gain).round() as usize).max(1);
+        let resized_h = ((height as f32 * gain).round() as usize).max(1);
+        let offset_x = (target - resized_w) / 2;
+        let offset_y = (target - resized_h) / 2;
         let side = target;
-        let mut input = vec![0f32; 3 * side * side];
-        for (index, pixel) in canvas.pixels().enumerate() {
-            let [r, g, b] = pixel.0;
-            input[index] = b as f32 / 255.0;
-            input[side * side + index] = g as f32 / 255.0;
-            input[2 * side * side + index] = r as f32 / 255.0;
+        let mut input = vec![114.0f32 / 255.0; 3 * side * side];
+        let plane = side * side;
+        for y in 0..resized_h {
+            let source_y = ((y as f32 + 0.5) * height as f32 / resized_h as f32 - 0.5)
+                .clamp(0.0, height as f32 - 1.0);
+            let y0 = source_y.floor() as usize;
+            let y1 = (y0 + 1).min(height - 1);
+            let fy = source_y - y0 as f32;
+            for x in 0..resized_w {
+                let source_x = ((x as f32 + 0.5) * width as f32 / resized_w as f32 - 0.5)
+                    .clamp(0.0, width as f32 - 1.0);
+                let x0 = source_x.floor() as usize;
+                let x1 = (x0 + 1).min(width - 1);
+                let fx = source_x - x0 as f32;
+                let at = |sx: usize, sy: usize| {
+                    let index = (sy * width + sx) * 3;
+                    (rgb[index] as f32, rgb[index + 1] as f32, rgb[index + 2] as f32)
+                };
+                let (r00, g00, b00) = at(x0, y0);
+                let (r10, g10, b10) = at(x1, y0);
+                let (r01, g01, b01) = at(x0, y1);
+                let (r11, g11, b11) = at(x1, y1);
+                let top = (1.0 - fx) / 255.0;
+                let bottom = fx / 255.0;
+                let r = (r00 * top + r10 * bottom) * (1.0 - fy) + (r01 * top + r11 * bottom) * fy;
+                let g = (g00 * top + g10 * bottom) * (1.0 - fy) + (g01 * top + g11 * bottom) * fy;
+                let b = (b00 * top + b10 * bottom) * (1.0 - fy) + (b01 * top + b11 * bottom) * fy;
+                let index = (y + offset_y) * side + x + offset_x;
+                input[index] = b;
+                input[plane + index] = g;
+                input[2 * plane + index] = r;
+            }
         }
 
-        let prep = std::time::Instant::now();
         let input = Tensor::from_array(([1usize, 3, side, side], input))
             .map_err(|error| format!("无法创建模型输入：{error}"))?;
-        let _ = prep;
         let outputs = self.session.run(ort::inputs!["images" => input])
             .map_err(|error| format!("版面推理失败：{error}"))?;
         let (shape, data) = outputs[0].try_extract_tensor::<f32>()
@@ -167,9 +230,27 @@ fn layout_enabled() -> bool {
     std::env::var("LITERATURE_READER_LAYOUT").map_or(true, |value| value != "0")
 }
 
-fn model() -> Option<&'static Mutex<Option<LayoutModel>>> {
-    static MODEL: OnceLock<Mutex<Option<LayoutModel>>> = OnceLock::new();
-    Some(MODEL.get_or_init(|| Mutex::new(None)))
+struct LoadedModel {
+    model: LayoutModel,
+    last_used: Instant,
+}
+
+const MODEL_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+static MODEL: OnceLock<Mutex<Option<LoadedModel>>> = OnceLock::new();
+
+fn model() -> &'static Mutex<Option<LoadedModel>> {
+    MODEL.get_or_init(|| {
+        // Keep the ONNX session (and its weights) only while layout is in use.
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let Some(lock) = MODEL.get() else { continue };
+            let Ok(mut guard) = lock.lock() else { continue };
+            if guard.as_ref().is_some_and(|loaded| loaded.last_used.elapsed() >= MODEL_IDLE) {
+                *guard = None;
+            }
+        });
+        Mutex::new(None)
+    })
 }
 
 fn cache_key(path: &Path, model: &Path, page: usize) -> Option<PathBuf> {
@@ -207,15 +288,20 @@ fn page_regions(path: &Path, page: usize, dpi: u32) -> Option<Vec<Region>> {
         return Some(regions);
     }
 
-    let guard = model()?.lock().ok()?;
+    let guard = model().lock().ok()?;
     let mut guard = guard;
-    if guard.is_none() {
-        *guard = LayoutModel::load(&path_model).ok();
+    if guard.as_ref().is_some_and(|loaded| loaded.last_used.elapsed() >= MODEL_IDLE) {
+        *guard = None;
     }
-    let Some(model) = guard.as_mut() else { return None };
+    if guard.is_none() {
+        if let Ok(model) = LayoutModel::load(&path_model) {
+            *guard = Some(LoadedModel { model, last_used: Instant::now() });
+        }
+    }
+    let Some(loaded) = guard.as_mut() else { return None };
     let ppm = pdf::render_page(path, page, dpi).ok()?;
-    let raster = Raster::decode(&ppm).ok()?;
-    let regions = model.detect(&raster, dpi).ok()?;
+    let regions = loaded.model.detect(&ppm, dpi).ok()?;
+    loaded.last_used = Instant::now();
     cache.lock().ok()?.insert(key, regions.clone());
     if let Some(disk) = disk
         && let Some(directory) = disk.parent()
@@ -308,16 +394,9 @@ pub fn probe(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let raster = match Raster::decode(&ppm) {
-        Ok(raster) => raster,
-        Err(error) => {
-            eprintln!("{error}");
-            return 1;
-        }
-    };
     let render_ms = started.elapsed().as_millis();
     let started = Instant::now();
-    let regions = match model.detect(&raster, 150) {
+    let regions = match model.detect(&ppm, 150) {
         Ok(regions) => regions,
         Err(error) => {
             eprintln!("{error}");
@@ -326,7 +405,7 @@ pub fn probe(args: &[String]) -> i32 {
     };
     let detect_ms = started.elapsed().as_millis();
     let warm = std::time::Instant::now();
-    let _ = model.detect(&raster, 150);
+    let _ = model.detect(&ppm, 150);
     let warm_ms = warm.elapsed().as_millis();
     let _ = writeln!(report, "page {page}: render {render_ms} ms, layout {detect_ms} ms, warm {warm_ms} ms, {} regions", regions.len());
     for region in &regions {

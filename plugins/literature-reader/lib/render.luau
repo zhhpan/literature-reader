@@ -669,6 +669,9 @@ local function statusSpans(state)
 	if state.modelsLoading then
 		table.insert(spans, ui.span(" · 正在读取模型…", "muted"))
 	end
+	if state.layoutMessage then
+		table.insert(spans, ui.span(" · " .. state.layoutMessage, "muted"))
+	end
 	local error = state.jobError
 	if not error and translation and translation.state == "error" then
 		error = translation.error or "翻译出错"

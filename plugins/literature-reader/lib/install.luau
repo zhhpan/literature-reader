@@ -9,6 +9,8 @@ local M = {}
 
 local DEFAULT_MANIFEST =
 	"https://github.com/zhhpan/literature-reader/releases/latest/download/literature-reader-tern.json"
+local DEFAULT_LAYOUT =
+	"https://github.com/zhhpan/literature-reader/releases/latest/download/literature-reader-tern-layout.json"
 
 local function manifestUrl()
 	local configured = nil
@@ -21,6 +23,18 @@ local function manifestUrl()
 		configured = fromEnv
 	end
 	return configured or DEFAULT_MANIFEST
+end
+
+local function layoutManifestUrl()
+	local ok, value = pcall(tern.kv.get, "layout_url")
+	if ok and type(value) == "string" and value ~= "" then
+		return value
+	end
+	local fromEnv = tern.getenv("LITERATURE_READER_LAYOUT_URL")
+	if type(fromEnv) == "string" and fromEnv ~= "" then
+		return fromEnv
+	end
+	return DEFAULT_LAYOUT
 end
 
 local function alive(pane)
@@ -137,6 +151,27 @@ local function extract(cx, state, zip, directory, settings, next)
 	end)
 end
 
+local function windowsDownload(url, target)
+	local quotedUrl = string.gsub(url, "'", "''")
+	local quotedTarget = string.gsub(target, "'", "''")
+	return table.concat({
+		"$ProgressPreference = 'SilentlyContinue'",
+		"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
+		"try {",
+		"  Start-BitsTransfer -Source '" .. quotedUrl .. "' -Destination '" .. quotedTarget .. "' -TransferType Download",
+		"  exit 0",
+		"} catch {",
+		"  try {",
+		"    Invoke-WebRequest -UseBasicParsing -Uri '" .. quotedUrl .. "' -OutFile '" .. quotedTarget .. "'",
+		"    exit 0",
+		"  } catch {",
+		"    [Console]::Error.WriteLine($_.Exception.Message)",
+		"    exit 1",
+		"  }",
+		"}",
+	}, "; ")
+end
+
 local function download(cx, state, entry, done)
 	local settings = { windows = tern.runtime.os == "windows" }
 	local directory = backend.bundleDir()
@@ -144,21 +179,7 @@ local function download(cx, state, entry, done)
 	pcall(tern.fs.mkdir, directory)
 	util.remove(part)
 	setMessage(cx, state, entry.message or "正在下载阅读内核…")
-	local url = string.gsub(entry.url, "'", "''")
-	local target = string.gsub(part, "'", "''")
-	-- PowerShell's .NET TLS stack reaches GitHub release assets where curl's
-	-- schannel handshake can stall on some networks; curl stays for other hosts.
-	local script = table.concat({
-		"$ProgressPreference = 'SilentlyContinue'",
-		"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
-		"try {",
-		"  Invoke-WebRequest -UseBasicParsing -Uri '" .. url .. "' -OutFile '" .. target .. "'",
-		"  exit 0",
-		"} catch {",
-		"  [Console]::Error.WriteLine($_.Exception.Message)",
-		"  exit 1",
-		"}",
-	}, "; ")
+	local script = windowsDownload(entry.url, part)
 	local argv = settings.windows
 		and { "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }
 		or { "curl", "-fsSL", "--retry", "3", "--connect-timeout", "20", "-o", part, entry.url }
@@ -186,6 +207,106 @@ local function download(cx, state, entry, done)
 				cx:render()
 				done()
 			end)
+		end)
+	end)
+end
+
+function M.layoutReady()
+	local directory = backend.bundleDir()
+	return util.exists(directory .. "/runtime/onnxruntime.dll")
+		and util.exists(directory .. "/runtime/DirectML.dll")
+		and util.exists(directory .. "/runtime/layout/doclayout.onnx")
+		and util.exists(directory .. "/literature-reader-layout.exe")
+end
+
+local function verifyLayout(cx, state, path, expected, settings, done, next)
+	setMessage(cx, state, "正在校验图表增强…")
+	local argv = settings.windows
+		and { "certutil.exe", "-hashfile", path, "SHA256" }
+		or { "sha256sum", path }
+	run(cx, argv, 120000, function(result)
+		local digest = hexDigest(result.stdout)
+		if not digest or string.lower(digest) ~= string.lower(expected) then
+			util.remove(path)
+			state.layoutJob = false
+			state.layoutMessage = nil
+			state.layoutError = "图表增强校验失败（SHA-256 不匹配）。"
+			done()
+			return
+		end
+		next()
+	end)
+end
+
+local function layoutDownload(cx, state, entry, done)
+	local settings = { windows = tern.runtime.os == "windows" }
+	local directory = backend.bundleDir()
+	local part = directory .. "/layout.zip.part"
+	pcall(tern.fs.mkdir, directory)
+	util.remove(part)
+	setMessage(cx, state, "正在下载图表增强（首次约 80 MB）…")
+	local script = windowsDownload(entry.url, part)
+	local argv = settings.windows
+		and { "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }
+		or { "curl", "-fsSL", "--retry", "3", "--connect-timeout", "20", "-o", part, entry.url }
+	run(cx, argv, 900000, function(result)
+		if result.status ~= 0 then
+			util.remove(part)
+			state.layoutError = "图表增强下载失败：" .. tostring(result.stderr or "")
+			done()
+			return
+		end
+		verifyLayout(cx, state, part, entry.sha256, settings, done, function()
+			setMessage(cx, state, "正在解压图表增强…")
+			local extractor = settings.windows
+				and { "tar.exe", "-xf", part, "-C", directory }
+				or { "tar", "-xf", part, "-C", directory }
+			run(cx, extractor, 300000, function(extracted)
+				util.remove(part)
+				if extracted.status ~= 0 or not M.layoutReady() then
+					state.layoutError = "图表增强解压失败。"
+				else
+					state.layoutError = nil
+					state.exe = backend.layoutExe()
+				end
+				done()
+			end)
+		end)
+	end)
+end
+
+-- Optional layout model and runtime. A failure leaves images on the existing
+-- heuristic crops instead of blocking reading.
+function M.ensureLayout(cx, state, done)
+	if M.layoutReady() or state.layoutJob or state.layoutError then
+		done()
+		return
+	end
+	state.layoutJob = true
+	state.layoutMessage = "正在准备图表增强…"
+	cx:render()
+	tern.fetch(layoutManifestUrl(), { timeout_ms = 20000 }, function(result)
+		if not alive(cx.pane) then
+			return
+		end
+		if result.error or result.status ~= 200 then
+			state.layoutJob = false
+			state.layoutError = "图表增强清单不可用。"
+			done()
+			return
+		end
+		local entry = util.decode(result.body)
+		if type(entry) ~= "table" or not validUrl(entry.url) or not validHash(entry.sha256) then
+			state.layoutJob = false
+			state.layoutError = "图表增强清单无效。"
+			done()
+			return
+		end
+		layoutDownload(cx, state, entry, function()
+			state.layoutJob = false
+			state.layoutMessage = nil
+			cx:render()
+			done()
 		end)
 	end)
 end

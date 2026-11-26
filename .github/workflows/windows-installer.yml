@@ -78,6 +78,22 @@ jobs:
           }
           "compiler=$compiler" >> $env:GITHUB_OUTPUT
 
+      - name: Stage the layout runtime
+        run: |
+          python -m pip install --quiet "onnxruntime-directml==1.24.4"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $capi = python -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))"
+          $root = 'target\release\runtime'
+          New-Item -ItemType Directory -Force "$root\layout" | Out-Null
+          Copy-Item -LiteralPath (Join-Path $capi 'onnxruntime.dll') -Destination "$root\onnxruntime.dll"
+          Copy-Item -LiteralPath (Join-Path $capi 'DirectML.dll') -Destination "$root\DirectML.dll"
+          $url = 'https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx/resolve/main/doclayout_yolo_docstructbench_imgsz1024.onnx'
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile "$root\layout\doclayout.onnx" -MaximumRetryCount 3 -RetryIntervalSec 2
+          $digest = (Get-FileHash -LiteralPath "$root\layout\doclayout.onnx" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne 'fece9af02f618b603ff7921ccec6861d13e7e1f9830e091dfb7e8ad9311e5b21') {
+              throw 'Layout model download failed SHA-256 verification.'
+          }
+
       - name: Build the Windows x64 executable
         run: |
           $flags = @('-C', 'target-feature=+crt-static',
@@ -119,6 +135,22 @@ jobs:
         with:
           name: ${{ steps.package.outputs.artifact }}
           path: target/release/${{ steps.package.outputs.filename }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload the reader executable
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: reader-exe
+          path: target/x86_64-pc-windows-msvc/release/literature-reader.exe
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload the layout runtime
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: layout-runtime
+          path: target/release/runtime
           if-no-files-found: error
           compression-level: 0
 
@@ -220,6 +252,18 @@ jobs:
           node-version: '22.23.5'
           package-manager-cache: false
 
+      - name: Download the reader executable
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: reader-exe
+          path: ${{ runner.temp }}/reader-exe
+
+      - name: Download the layout runtime
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: layout-runtime
+          path: ${{ runner.temp }}/layout-runtime
+
       - name: Install the Tern backend dependencies
         run: |
           npm.cmd ci --prefix bridge --omit=dev --ignore-scripts --no-audit --no-fund --no-update-notifier
@@ -238,12 +282,25 @@ jobs:
         run: |
           $bin = (Get-ChildItem poppler -Recurse -Filter pdftotext.exe | Select-Object -First 1).DirectoryName
           if (!$bin) { throw 'Poppler tools are missing from the archive.' }
+          $reader = (Get-ChildItem "$env:RUNNER_TEMP/reader-exe" -Recurse -Filter literature-reader.exe | Select-Object -First 1).FullName
+          if (!$reader) { throw 'The reader executable artifact is missing.' }
+          $layout = "$env:RUNNER_TEMP/layout-runtime"
+          if (!(Test-Path "$layout/onnxruntime.dll") -and (Test-Path "$layout/runtime/onnxruntime.dll")) {
+              $layout = "$layout/runtime"
+          }
+          if (!(Test-Path "$layout/onnxruntime.dll")) { throw 'The layout runtime artifact is missing.' }
           ./installer/package-backend.ps1 `
-              -AppExecutable target/release/literature-reader.exe `
+              -AppExecutable $reader `
               -NodeExe (Get-Command node).Source `
               -PopplerDir $bin `
               -BridgeDir bridge `
               -OutputDir target/tern-backend `
+              -ReleaseTag $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./installer/package-layout.ps1 `
+              -AppExecutable $reader `
+              -RuntimeDir $layout `
+              -OutputDir target/tern-layout `
               -ReleaseTag $env:GITHUB_REF_NAME
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -315,7 +372,13 @@ jobs:
           ) | ForEach-Object {
               @{ File = $_; Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
           }
-          $publishedFiles = $packages + @{ File = $manifestFile; Hash = $manifestDigest } + $ternFiles
+          $layoutFiles = @(
+              Get-Item -LiteralPath 'target/tern-layout/literature-reader-tern-layout-win-x64.zip'
+              Get-Item -LiteralPath 'target/tern-layout/literature-reader-tern-layout.json'
+          ) | ForEach-Object {
+              @{ File = $_; Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+          }
+          $publishedFiles = $packages + @{ File = $manifestFile; Hash = $manifestDigest } + $ternFiles + $layoutFiles
           $uploadPaths = @($publishedFiles | ForEach-Object { $_.File.FullName })
 
           function Get-Release {

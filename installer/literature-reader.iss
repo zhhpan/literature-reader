@@ -50,6 +50,9 @@ Source: "{#PopplerManifest}"; Flags: dontcopy
 Source: "{#PayloadDir}\reader-bridge-launcher.sha256"; Flags: dontcopy
 Source: "{#PayloadDir}\reader-bridge-sdk.sha256"; Flags: dontcopy
 Source: "{#PayloadDir}\literature-reader.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PayloadDir}\runtime\onnxruntime.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PayloadDir}\runtime\DirectML.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#PayloadDir}\runtime\layout\doclayout.onnx"; DestDir: "{app}\runtime\layout"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#PayloadDir}\bridge\bridge.mjs"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher
 Source: "{#PayloadDir}\bridge\package.json"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher
 Source: "{#PayloadDir}\bridge\package-lock.json"; DestDir: "{app}\bridge"; Flags: ignoreversion; Check: NeedsBridgeLauncher

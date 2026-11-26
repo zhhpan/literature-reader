@@ -4,6 +4,7 @@ param(
     [string]$Compiler = 'ISCC.exe',
     [string]$AppExecutable,
     [switch]$Offline,
+    [switch]$SkipLayout,
     [ValidateNotNullOrEmpty()]
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$SigningCertificateThumbprint,
@@ -54,6 +55,20 @@ try {
     $output = (New-Item -ItemType Directory -Path (Join-Path $stage.FullName 'output')).FullName
     $stagedApp = Join-Path $stage.FullName 'literature-reader.exe'
     Copy-Item -LiteralPath $app.FullName -Destination $stagedApp
+    if (!$SkipLayout) {
+        # The desktop build ships the layout model and its runtime so figure and
+        # table crops are refined offline. The Tern plugin downloads these later.
+        $layoutSource = Join-Path $release 'runtime'
+        foreach ($name in @('onnxruntime.dll', 'DirectML.dll', 'layout\doclayout.onnx')) {
+            $source = Join-Path $layoutSource $name
+            if (!(Test-Path -LiteralPath $source)) {
+                throw "Layout runtime is missing $name under $layoutSource; stage it or pass -SkipLayout."
+            }
+            $destination = Join-Path (Join-Path $stage.FullName 'runtime') $name
+            [void][IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+            Copy-Item -LiteralPath $source -Destination $destination
+        }
+    }
     $compilerOptions = @('/Q', "/DAppVersion=$appVersion", "/DPayloadDir=$($stage.FullName)")
     if ($signing) {
         & $signToolPath sign @signArgs $stagedApp
