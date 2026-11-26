@@ -53,6 +53,11 @@ function Upload-Attachment([int]$ReleaseId, [string]$Path) {
     $attachment
 }
 
+$giteeUrl = "https://oauth2:$Token@gitee.com/$GiteeRepository.git"
+# Make the tag and the release commit available on Gitee before the API call.
+& git -C (Split-Path -Parent $PSScriptRoot) push --force $giteeUrl "HEAD:refs/heads/master" "refs/tags/${Tag}:refs/tags/${Tag}"
+if ($LASTEXITCODE -ne 0) { throw 'Could not push the tag to Gitee.' }
+
 $releases = Invoke-Gitee GET "$api/releases?access_token=$Token"
 $existing = @($releases) | Where-Object tag_name -eq $Tag | Select-Object -First 1
 if ($existing) {
@@ -111,7 +116,6 @@ $message = "Update the Gitee manifest for $Tag"
 & git -C $root add gitee-update.json
 & git -C $root -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m $message
 if ($LASTEXITCODE -ne 0) { throw 'Could not commit gitee-update.json.' }
-$giteeUrl = "https://oauth2:$Token@gitee.com/$GiteeRepository.git"
 & git -C $root push $giteeUrl "HEAD:refs/heads/master"
 if ($LASTEXITCODE -ne 0) { throw 'Could not push the Gitee manifest.' }
 if ($GitHubToken) {
