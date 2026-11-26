@@ -419,3 +419,36 @@ jobs:
           }
           if ($release.draft -or !$release.published_at) { throw 'GitHub has not published the release.' }
           $release.html_url
+
+  sync_gitee:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [publish]
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:GITHUB_REF_NAME --dir gitee-assets --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Mirror the release to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./installer/sync-gitee.ps1 `
+              -Tag $env:GITHUB_REF_NAME `
+              -AssetsDir gitee-assets `
+              -Token $env:GITEE_TOKEN `
+              -GitHubToken $env:GH_TOKEN
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

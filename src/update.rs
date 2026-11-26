@@ -31,7 +31,7 @@ const FILE_SHARE_READ: u32 = 1;
 pub struct Release {
     pub version: String,
     pub size: u64,
-    url: Url,
+    urls: Vec<Url>,
     digest: [u8; 32],
 }
 
@@ -41,7 +41,7 @@ pub struct VerifiedInstaller {
     _verified_file: File,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ReleaseInfo {
     tag_name: String,
     draft: bool,
@@ -49,13 +49,22 @@ struct ReleaseInfo {
     assets: Vec<Asset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Asset {
     name: String,
     state: String,
     size: u64,
     browser_download_url: String,
     digest: Option<String>,
+    #[serde(default)]
+    parts: Vec<AssetPart>,
+}
+
+#[derive(Clone, Deserialize)]
+struct AssetPart {
+    name: String,
+    size: u64,
+    url: String,
 }
 
 pub fn check() -> Result<Option<Release>, String> {
@@ -136,15 +145,35 @@ fn newer_gitee_release(info: ReleaseInfo, current: [u32; 3]) -> Result<Option<Re
     let name = asset_name(number);
     let asset = info.assets.into_iter().find(|asset| asset.name == name && asset.state == "uploaded")
         .ok_or_else(|| "Gitee 新版还没有可用的 Windows x64 安装包。".to_owned())?;
-    let url = Url::parse(&asset.browser_download_url)
-        .map_err(|_| "Gitee 安装包的下载地址无效。".to_owned())?;
-    if !gitee_download_url(&url, &info.tag_name, &name) || !(1..=MAX_INSTALLER_BYTES).contains(&asset.size) {
-        return Err("Gitee 新版安装包的下载地址或大小不符合要求。".into());
+    if !(1..=MAX_INSTALLER_BYTES).contains(&asset.size) {
+        return Err("Gitee 新版安装包的大小不符合要求。".into());
     }
+    let urls = if asset.parts.is_empty() {
+        let url = Url::parse(&asset.browser_download_url)
+            .map_err(|_| "Gitee 安装包的下载地址无效。".to_owned())?;
+        if !gitee_download_url(&url, &info.tag_name, &name) {
+            return Err("Gitee 新版安装包的下载地址不符合要求。".into());
+        }
+        vec![url]
+    } else {
+        if asset.parts.iter().map(|part| part.size).sum::<u64>() != asset.size {
+            return Err("Gitee 安装包分片大小与总大小不一致。".into());
+        }
+        let mut urls = Vec::with_capacity(asset.parts.len());
+        for part in &asset.parts {
+            let url = Url::parse(&part.url)
+                .map_err(|_| "Gitee 安装包分片的下载地址无效。".to_owned())?;
+            if part.size == 0 || !gitee_download_url(&url, &info.tag_name, &part.name) {
+                return Err("Gitee 安装包分片的下载地址或大小不符合要求。".into());
+            }
+            urls.push(url);
+        }
+        urls
+    };
     let digest = asset.digest.as_deref().and_then(parse_digest)
         .ok_or_else(|| "Gitee 未提供新版安装包的 SHA-256 校验值。".to_owned())?;
     Ok(Some(Release {
-        version: number.to_owned(), size: asset.size, url, digest,
+        version: number.to_owned(), size: asset.size, urls, digest,
     }))
 }
 
@@ -240,7 +269,7 @@ fn newer_release(info: ReleaseInfo, current: [u32; 3]) -> Result<Option<Release>
     let digest = asset.digest.as_deref().and_then(parse_digest)
         .ok_or_else(|| "GitHub 未提供新版安装包的 SHA-256 校验值。".to_owned())?;
     Ok(Some(Release {
-        version: number.to_owned(), size: asset.size, url: Url::parse(&expected_url).unwrap(), digest,
+        version: number.to_owned(), size: asset.size, urls: vec![Url::parse(&expected_url).unwrap()], digest,
     }))
 }
 
@@ -314,36 +343,38 @@ pub fn download(release: &Release, mut progress: impl FnMut(u64, u64)) -> Result
     fs::create_dir_all(&directory).map_err(|error| format!("无法创建更新下载目录：{error}"))?;
     let mut partial = tempfile::Builder::new().prefix("download-").suffix(".partial").tempfile_in(&directory)
         .map_err(|error| format!("无法创建更新文件：{error}"))?;
-    let mut response = asset_response(&release.url)?;
     let mut buffer = vec![0; 64 * 1024];
     let hash = Sha256::new().map_err(|error| error.to_string())?;
     let mut received = 0;
     let started = Instant::now();
     let mut last_report = started;
-    loop {
-        if started.elapsed() > Duration::from_secs(15 * 60) {
-            return Err("下载安装包超时。请检查网络后重试。".into());
-        }
-        let read = response.read(&mut buffer).map_err(|error| format!("下载安装包时连接中断：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        received += read as u64;
-        if received > release.size {
-            return Err("安装包的下载大小与 GitHub 发布记录不一致。".into());
-        }
-        partial.write_all(&buffer[..read]).map_err(|error| format!("无法保存安装包：{error}"))?;
-        hash.update(&buffer[..read]).map_err(|error| error.to_string())?;
-        if received == release.size || last_report.elapsed() >= Duration::from_millis(200) {
-            progress(received, release.size);
-            last_report = Instant::now();
+    for url in &release.urls {
+        let mut response = asset_response(url)?;
+        loop {
+            if started.elapsed() > Duration::from_secs(15 * 60) {
+                return Err("下载安装包超时。请检查网络后重试。".into());
+            }
+            let read = response.read(&mut buffer).map_err(|error| format!("下载安装包时连接中断：{error}"))?;
+            if read == 0 {
+                break;
+            }
+            received += read as u64;
+            if received > release.size {
+                return Err("安装包的下载大小与发布记录不一致。".into());
+            }
+            partial.write_all(&buffer[..read]).map_err(|error| format!("无法保存安装包：{error}"))?;
+            hash.update(&buffer[..read]).map_err(|error| error.to_string())?;
+            if received == release.size || last_report.elapsed() >= Duration::from_millis(200) {
+                progress(received, release.size);
+                last_report = Instant::now();
+            }
         }
     }
     if received != release.size || hash.finish().map_err(|error| error.to_string())? != release.digest {
         return Err("安装包未通过 SHA-256 校验，请重新下载。".into());
     }
     let temporary = partial.into_temp_path();
-    mark_internet_download(&temporary, &release.url)?;
+    mark_internet_download(&temporary, &release.urls[0])?;
     let path = directory.join(asset_name(&release.version));
     temporary.persist(&path).map_err(|error| format!("无法保存已校验的安装包：{}", error.error))?;
 
@@ -428,6 +459,7 @@ mod tests {
                 size: 12,
                 browser_download_url: format!("https://github.com/{REPO}/releases/download/v0.1.10/{}", asset_name("0.1.10")),
                 digest: Some(format!("sha256:{}", "aa".repeat(32))),
+                parts: Vec::new(),
             }],
         }
     }
@@ -460,7 +492,7 @@ mod tests {
             "https://gitee.com/{GITEE_REPO}/releases/download/v0.2.0/{}", asset_name("0.2.0"));
         let release = newer_gitee_release(info, [0, 1, 2]).unwrap().unwrap();
         assert_eq!(release.version, "0.2.0");
-        assert_eq!(release.url.host_str(), Some("gitee.com"));
+        assert_eq!(release.urls[0].host_str(), Some("gitee.com"));
 
         let mut wrong = release_info();
         wrong.tag_name = "v0.2.0".into();
@@ -468,6 +500,27 @@ mod tests {
         wrong.assets[0].browser_download_url = format!(
             "https://gitee.com/other/literature-reader/releases/download/v0.2.0/{}", asset_name("0.2.0"));
         assert!(newer_gitee_release(wrong, [0, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn accepts_gitee_split_parts_when_their_sizes_add_up() {
+        let mut info = release_info();
+        info.tag_name = "v0.2.0".into();
+        info.assets[0].name = asset_name("0.2.0");
+        info.assets[0].size = 30;
+        info.assets[0].browser_download_url = format!(
+            "https://gitee.com/{GITEE_REPO}/releases/download/v0.2.0/{}", asset_name("0.2.0"));
+        info.assets[0].parts = vec![
+            AssetPart { name: format!("{}.part1", asset_name("0.2.0")), size: 20,
+                url: format!("https://gitee.com/{GITEE_REPO}/releases/download/v0.2.0/{}.part1", asset_name("0.2.0")) },
+            AssetPart { name: format!("{}.part2", asset_name("0.2.0")), size: 10,
+                url: format!("https://gitee.com/{GITEE_REPO}/releases/download/v0.2.0/{}.part2", asset_name("0.2.0")) },
+        ];
+        let release = newer_gitee_release(info.clone(), [0, 1, 2]).unwrap().unwrap();
+        assert_eq!(release.urls.len(), 2);
+        assert_eq!(release.size, 30);
+        info.assets[0].parts[1].size = 11;
+        assert!(newer_gitee_release(info, [0, 1, 2]).is_err());
     }
 
     #[test]
@@ -498,10 +551,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let temporary = tempfile::NamedTempFile::new_in(directory.path()).unwrap().into_temp_path();
         let release = newer_release(release_info(), [0, 1, 2]).unwrap().unwrap();
-        mark_internet_download(&temporary, &release.url).unwrap();
+        mark_internet_download(&temporary, &release.urls[0]).unwrap();
         temporary.persist(directory.path().join("installer.exe")).unwrap();
         let marked = fs::read_to_string(directory.path().join("installer.exe:Zone.Identifier")).unwrap();
         assert!(marked.contains("ZoneId=3\r\n"));
-        assert!(marked.contains(release.url.as_str()));
+        assert!(marked.contains(release.urls[0].as_str()));
     }
 }
