@@ -450,6 +450,5 @@ jobs:
           python installer/sync-gitee.py `
               --tag $env:GITHUB_REF_NAME `
               --assets gitee-assets `
-              --token $env:GITEE_TOKEN `
-              --github-token $env:GH_TOKEN
+              --token $env:GITEE_TOKEN
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
