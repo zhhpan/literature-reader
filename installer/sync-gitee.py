@@ -102,14 +102,14 @@ def main() -> int:
     token = args.token
     gitee_url = f"https://oauth2:{token}@gitee.com/{args.repo}.git"
     subprocess.run(["git", "-C", str(root), "push", "--force", gitee_url,
-                    "HEAD:refs/heads/master", f"refs/tags/{args.tag}:refs/tags/{args.tag}"],
+                    "HEAD:refs/heads/main", "HEAD:refs/heads/master", f"refs/tags/{args.tag}:refs/tags/{args.tag}"],
                    check=True)
     subprocess.run(["git", "-C", str(root), "add", "gitee-update.json"], check=True)
     if subprocess.run(["git", "-C", str(root), "diff", "--cached", "--quiet"]).returncode != 0:
         subprocess.run(["git", "-C", str(root), "-c", "user.name=github-actions[bot]",
                         "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
                         "commit", "-m", f"Update the Gitee manifest for {args.tag}"], check=True)
-        subprocess.run(["git", "-C", str(root), "push", gitee_url, "HEAD:refs/heads/master"], check=True)
+        subprocess.run(["git", "-C", str(root), "push", gitee_url, "HEAD:refs/heads/main", "HEAD:refs/heads/master"], check=True)
         if args.github_token:
             github_url = f"https://x-access-token:{args.github_token}@github.com/{args.repo}.git"
             subprocess.run(["git", "-C", str(root), "push", github_url, "HEAD:refs/heads/main"], check=True)
