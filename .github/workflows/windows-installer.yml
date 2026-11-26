@@ -434,21 +434,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Download release assets
+      - name: Download the installer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download $env:GITHUB_REF_NAME --dir gitee-assets --clobber
+          gh release download $env:GITHUB_REF_NAME --pattern "LiteratureReader-Setup-*-x64.exe" --dir gitee-assets --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --quiet requests
 
       - name: Mirror the release to Gitee
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          ./installer/sync-gitee.ps1 `
-              -Tag $env:GITHUB_REF_NAME `
-              -AssetsDir gitee-assets `
-              -Token $env:GITEE_TOKEN `
-              -GitHubToken $env:GH_TOKEN
+          python installer/sync-gitee.py `
+              --tag $env:GITHUB_REF_NAME `
+              --assets gitee-assets `
+              --token $env:GITEE_TOKEN `
+              --github-token $env:GH_TOKEN
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
