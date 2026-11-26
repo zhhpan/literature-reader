@@ -20,6 +20,13 @@ const IMAGE_BUDGET: usize = 48 * 1024 * 1024;
 const OUTPUT_RATE_STALE_AFTER: Duration = Duration::from_secs(3);
 const ACCOUNT_REFRESH_INTERVAL: Duration = Duration::from_secs(8);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranslateScope {
+    Page(usize),
+    All,
+    References,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImageKey {
     Page(usize),
@@ -225,8 +232,7 @@ pub struct Reader {
     reading_position: Option<ReadingPosition>,
     translation_cache: CacheState,
     unsaved_translations: TranslationRows,
-    translation_requested: bool,
-    auto_translate: bool,
+    pending_scope: Option<TranslateScope>,
     translation_total: usize,
     translation_preview: HashMap<usize, TranslatedText>,
     changed_translations: Vec<usize>,
@@ -244,15 +250,15 @@ pub struct Reader {
 
 impl Reader {
     pub fn new() -> Self {
-        Self::create(true, true)
+        Self::create(true)
     }
 
-    /// A reader without a window: translation never starts on its own and model discovery is optional.
+    /// A reader without a window: translation never starts on its own.
     pub fn new_headless(discover_models: bool) -> Self {
-        Self::create(discover_models, false)
+        Self::create(discover_models)
     }
 
-    fn create(discover_models: bool, auto_translate: bool) -> Self {
+    fn create(discover_models: bool) -> Self {
         let (send, events) = mpsc::channel();
         let (render_jobs, jobs) = mpsc::channel::<RenderJob>();
         let render_events = send.clone();
@@ -279,8 +285,8 @@ impl Reader {
             pdf_id: None, reading_position: None,
             translation_cache: CacheState::Pending, unsaved_translations: Vec::new(),
             translations: Vec::new(), translation_math: Vec::new(), translated_count: 0, translation_layout_reset: 0,
-            translation_model: None, translation: None, translation_requested: false,
-            auto_translate, translation_total: 0, translation_preview: HashMap::new(), changed_translations: Vec::new(),
+            translation_model: None, translation: None, pending_scope: None,
+            translation_total: 0, translation_preview: HashMap::new(), changed_translations: Vec::new(),
             translation_error: None, login_cancel: None, login_url: None,
             credits: DocumentCredits::default(), credits_loaded: false,
             images: HashMap::new(), image_bytes: 0,
@@ -312,7 +318,7 @@ impl Reader {
         self.translation_math.clear();
         self.reset_translations();
         self.translation_total = 0;
-        self.translation_requested = self.auto_translate && self.preferred_model.is_some();
+        self.pending_scope = None;
         self.translation_error = None;
         self.images.clear();
         self.image_bytes = 0;
@@ -396,6 +402,15 @@ impl Reader {
         self.translated_count < self.translation_total || !self.unsaved_translations.is_empty()
     }
 
+    pub fn pending_count(&self, scope: TranslateScope) -> usize {
+        let Some(document) = self.document.as_deref() else { return 0 };
+        (0..document.blocks.len()).filter(|&index| {
+            self.translations.get(index).is_some_and(Option::is_none)
+                && translation_source(document, index).is_some()
+                && scope_matches(scope, document.blocks[index].kind, document.blocks[index].page)
+        }).count()
+    }
+
     pub fn cache_ready(&self) -> bool {
         matches!(self.translation_cache, CacheState::Ready(_) | CacheState::Failed)
     }
@@ -443,7 +458,6 @@ impl Reader {
             self.preferred_model = Some(id.to_owned());
         }
         self.set_model(Some(id.to_owned()));
-        self.start_translation();
     }
 
     fn set_model(&mut self, model: Option<String>) {
@@ -486,11 +500,11 @@ impl Reader {
         self.login_url.take()
     }
 
-    pub fn start_translation(&mut self) {
+    pub fn start_translation(&mut self, scope: TranslateScope) {
         if self.translation.as_ref().is_some_and(|job| !job.stopping()) {
             return;
         }
-        self.translation_requested = true;
+        self.pending_scope = Some(scope);
         if matches!(self.translation_cache, CacheState::Failed) {
             self.translation_cache = CacheState::Pending;
         }
@@ -534,7 +548,8 @@ impl Reader {
 
     fn start_requested_translation(&mut self) {
         self.load_translation_cache();
-        if !self.translation_requested || self.translation.is_some() || !self.can_translate() {
+        let Some(scope) = self.pending_scope else { return };
+        if self.translation.is_some() || !self.can_translate() {
             return;
         }
         let (Some(document), Some(model_id), Some(pdf_id)) = (&self.document, &self.model, self.pdf_id) else {
@@ -542,14 +557,18 @@ impl Reader {
         };
         let Some(model) = self.models.iter().find(|model| &model.id == model_id).cloned() else { return };
         let CacheState::Ready(cache) = &self.translation_cache else { return };
-        self.translation_requested = false;
+        self.pending_scope = None;
         self.translation_error = None;
-        if !self.has_pending_translation() {
+        let input: Vec<_> = (0..document.blocks.len())
+            .filter(|&index| {
+                self.translations[index].is_none()
+                    && translation_source(document, index).is_some()
+                    && scope_matches(scope, document.blocks[index].kind, document.blocks[index].page)
+            })
+            .collect();
+        if input.is_empty() {
             return;
         }
-        let input: Vec<_> = (0..document.blocks.len())
-            .filter(|&index| self.translations[index].is_none() && translation_source(document, index).is_some())
-            .collect();
         let unsaved = self.unsaved_translations.clone();
         let cache = cache.clone();
         let document = Arc::clone(document);
@@ -557,7 +576,7 @@ impl Reader {
         let generation = self.generation;
         let revision = self.translation_layout_reset;
         self.translation = Some(ActiveTranslation {
-            done: self.translated_count, total: self.translation_total, generation, cancel: cancel.clone(),
+            done: 0, total: input.len(), generation, cancel: cancel.clone(),
             output_rate: None,
         });
         let send = self.send.clone();
@@ -574,7 +593,7 @@ impl Reader {
     }
 
     pub fn cancel_translation(&mut self) {
-        self.translation_requested = false;
+        self.pending_scope = None;
         self.stop_active_translation();
     }
 
@@ -646,7 +665,9 @@ impl Reader {
                             self.translations.resize(document.blocks.len(), None);
                             self.translation_math.resize_with(document.blocks.len(), Vec::new);
                             self.translation_total = (0..document.blocks.len())
-                                .filter(|&index| translation_source(&document, index).is_some()).count();
+                                .filter(|&index| is_auto_translatable(document.blocks[index].kind)
+                                    && translation_source(&document, index).is_some())
+                                .count();
                             self.document = Some(Arc::new(document));
                             self.citation_links = citation_links;
                             self.reference_links = reference_links;
@@ -817,7 +838,10 @@ impl Reader {
     fn apply_translations(&mut self, rows: TranslationRows) {
         for (index, TranslatedText { text, formulas }) in rows {
             self.translation_preview.remove(&index);
-            if self.translations[index].replace(text).is_none() {
+            let counted = self.document.as_deref()
+                .and_then(|document| document.blocks.get(index))
+                .is_some_and(|block| is_auto_translatable(block.kind));
+            if self.translations[index].replace(text).is_none() && counted {
                 self.translated_count += 1;
             }
             self.translation_math[index] = formulas;
@@ -842,6 +866,19 @@ impl Reader {
 
 pub fn is_translatable(kind: BlockKind) -> bool {
     matches!(kind, BlockKind::Title | BlockKind::Heading | BlockKind::Paragraph | BlockKind::Caption | BlockKind::Reference)
+}
+
+/// References are translated only when the reader explicitly asks for them.
+fn is_auto_translatable(kind: BlockKind) -> bool {
+    is_translatable(kind) && kind != BlockKind::Reference
+}
+
+fn scope_matches(scope: TranslateScope, kind: BlockKind, page: usize) -> bool {
+    match scope {
+        TranslateScope::Page(current) => page == current && is_auto_translatable(kind),
+        TranslateScope::All => is_auto_translatable(kind),
+        TranslateScope::References => kind == BlockKind::Reference,
+    }
 }
 
 pub(crate) fn translation_source(document: &Document, index: usize) -> Option<(TranslationStyle, &str)> {
@@ -920,4 +957,20 @@ fn translate(
         return Err(format!("有 {skipped} 个段落未返回可用译文，已保留原文。"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translation_scopes_keep_references_explicit() {
+        assert!(scope_matches(TranslateScope::Page(2), BlockKind::Paragraph, 2));
+        assert!(!scope_matches(TranslateScope::Page(2), BlockKind::Paragraph, 1));
+        assert!(!scope_matches(TranslateScope::Page(2), BlockKind::Reference, 2));
+        assert!(scope_matches(TranslateScope::All, BlockKind::Caption, 4));
+        assert!(!scope_matches(TranslateScope::All, BlockKind::Reference, 4));
+        assert!(scope_matches(TranslateScope::References, BlockKind::Reference, 4));
+        assert!(!scope_matches(TranslateScope::References, BlockKind::Paragraph, 4));
+    }
 }

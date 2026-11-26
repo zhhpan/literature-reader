@@ -3,7 +3,7 @@
 use crate::math;
 use crate::model_settings;
 use crate::pdf::{self, BlockKind};
-use crate::reader::{Raster, Reader};
+use crate::reader::{Raster, Reader, TranslateScope};
 use crate::recent_documents::RecentDocuments;
 use crate::translation::{Account, Model, Translator};
 use image::ImageEncoder as _;
@@ -140,6 +140,7 @@ fn translate(pdf: &str, out: &Path, model_id: &str) -> i32 {
         return 0;
     }
     reader.select_model(model_id);
+    reader.start_translation(TranslateScope::All);
 
     let mut last_write: Option<Instant> = None;
     loop {

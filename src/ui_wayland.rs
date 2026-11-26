@@ -1,5 +1,5 @@
 use crate::pdf::BlockKind;
-use crate::reader::{ImageKey, Raster, Reader, is_translatable};
+use crate::reader::{ImageKey, Raster, Reader, TranslateScope, is_translatable};
 use crate::reading_position::{ReadingPosition, Section};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -76,6 +76,8 @@ struct App {
     account: AccountPanel,
     updates: UpdateControl,
     translate: gtk::Button,
+    translate_all: gtk::Button,
+    translate_refs: gtk::Button,
     models: gtk::DropDown,
     menu_models: RefCell<Vec<(String, String)>>,
     syncing_model: Cell<bool>,
@@ -130,7 +132,9 @@ impl App {
         let previous = gtk::Button::with_label("‹");
         let next = gtk::Button::with_label("›");
         let page = gtk::Label::new(None);
-        let translate = gtk::Button::with_label("继续翻译");
+        let translate = gtk::Button::with_label("翻译本页");
+        let translate_all = gtk::Button::with_label("翻译全文");
+        let translate_refs = gtk::Button::with_label("参考文献");
         let link = gtk::LinkButton::with_label("https://www.codebuddy.cn/", "复制授权链接");
         link.connect_activate_link(|link| {
             WidgetExt::display(link).clipboard().set_text(&link.uri());
@@ -143,6 +147,8 @@ impl App {
         controls.append(&next);
         controls.append(&link);
         controls.append(&translate);
+        controls.append(&translate_all);
+        controls.append(&translate_refs);
         root.append(&controls);
 
         let stack = gtk::Stack::new();
@@ -180,7 +186,7 @@ impl App {
         let app = Rc::new(Self {
             reader: RefCell::new(Reader::new()), window, stack, paper, paper_scroll, original_scroll,
             original, original_loaded: Cell::new(None), status, rate, credit_count, title, mode, previous, next, page,
-            login, account, updates, translate, models, menu_models: RefCell::new(Vec::new()), syncing_model: Cell::new(false),
+            login, account, updates, translate, translate_all, translate_refs, models, menu_models: RefCell::new(Vec::new()), syncing_model: Cell::new(false),
             recent, recent_menu, recent_paths: RefCell::new(Vec::new()), link,
             rows: RefCell::new(Vec::new()), paper_generation: Cell::new(usize::MAX), translation_revision: Cell::new(0),
             pending_position: Cell::new(None), dirty_position: Cell::new(None), chooser: RefCell::new(None),
@@ -242,8 +248,25 @@ impl App {
             let Some(app) = app.upgrade() else { return };
             {
                 let mut reader = app.reader.borrow_mut();
-                if reader.translation.is_some() { reader.cancel_translation(); } else { reader.start_translation(); }
+                if reader.translation.is_some() {
+                    reader.cancel_translation();
+                } else {
+                    let page = reader.page;
+                    reader.start_translation(TranslateScope::Page(page));
+                }
             }
+            app.sync_widgets();
+        });
+        let app = Rc::downgrade(self);
+        self.translate_all.connect_clicked(move |_| {
+            let Some(app) = app.upgrade() else { return };
+            app.reader.borrow_mut().start_translation(TranslateScope::All);
+            app.sync_widgets();
+        });
+        let app = Rc::downgrade(self);
+        self.translate_refs.connect_clicked(move |_| {
+            let Some(app) = app.upgrade() else { return };
+            app.reader.borrow_mut().start_translation(TranslateScope::References);
             app.sync_widgets();
         });
         let app = Rc::downgrade(self);
@@ -370,16 +393,28 @@ impl App {
         self.next.set_sensitive(page < count);
         self.stack.set_visible_child_name(if count == 0 { "welcome" } else if original { "original" } else { "paper" });
 
+        let page = reader.page;
+        let page_pending = reader.pending_count(TranslateScope::Page(page));
+        let all_pending = reader.pending_count(TranslateScope::All);
+        let ref_pending = reader.pending_count(TranslateScope::References);
+        let running = reader.translation.is_some();
         let (rate, can_translate, action) = match &reader.translation {
             Some(job) if job.stopping() => (String::new(), false, "正在停止"),
             Some(job) => (job.output_rate().map_or_else(|| "等待模型输出…".into(), |rate| format!("≈ {rate:.1} token/s")), true, "停止翻译"),
-            None => (String::new(), reader.can_translate() && reader.has_pending_translation(), "继续翻译"),
+            None => (String::new(), reader.can_translate() && page_pending > 0, "翻译本页"),
         };
         self.rate.set_text(&rate);
         self.rate.set_visible(!rate.is_empty());
         self.translate.set_label(action);
         self.translate.set_sensitive(can_translate);
-        self.translate.set_visible(count > 0);
+        self.translate.set_visible(count > 0 && (page_pending > 0 || running));
+        let base = reader.can_translate() && !running;
+        self.translate_all.set_label(&format!("翻译全文（{all_pending}）"));
+        self.translate_all.set_sensitive(base && all_pending > 0);
+        self.translate_all.set_visible(count > 0 && (all_pending > 0 || running));
+        self.translate_refs.set_label(&format!("参考文献（{ref_pending}）"));
+        self.translate_refs.set_sensitive(base && ref_pending > 0);
+        self.translate_refs.set_visible(count > 0 && (ref_pending > 0 || running));
         self.status.set_text(&status(&reader));
         self.credit_count.set_text(&credit_label(&reader));
         self.credit_count.set_visible(count > 0);

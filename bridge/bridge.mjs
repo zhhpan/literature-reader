@@ -16,7 +16,7 @@ const PROVIDER_ACCOUNTS_URL = 'https://copilot.tencent.com/v2/plugin/accounts';
 const BILLING_SUMMARY_URL = 'https://www.workbuddy.cn/billing/meter/get-user-resource-summary';
 const CATALOG_TIMEOUT = 35_000;
 const TRANSLATION_TIMEOUT = 120_000;
-const SESSION_BATCH_LIMIT = 2;
+const SESSION_BATCH_LIMIT = 1;
 const SESSION_SOURCE_LIMIT = 7_000;
 const OUTPUT_FLUSH_INTERVAL = 80;
 const OUTPUT_RATE_INTERVAL = 500;
@@ -386,7 +386,7 @@ async function models(sdk, cwd) {
       const multiplier = creditMultiplier(model.credits);
       unique.set(id, {
         id, display_name: label || id,
-        disable_thinking: hasCapabilities && model.onlyReasoning !== true && model.reasoning?.canDisableThinking !== false,
+        disable_thinking: hasCapabilities && model.reasoning?.canDisableThinking === true,
         ...(multiplier === undefined ? {} : { credit_multiplier: multiplier }),
       });
     }

@@ -30,8 +30,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 
-const MAX_BATCH_CHARACTERS: usize = 3_000;
-const MAX_BATCH_PARAGRAPHS: usize = 12;
+const MAX_BATCH_CHARACTERS: usize = 6_000;
+const MAX_BATCH_PARAGRAPHS: usize = 16;
 const MAX_BRIDGE_EVENT_BYTES: u64 = 1024 * 1024;
 
 // None means the application is shutting down and must not start another SDK child.

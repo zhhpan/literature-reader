@@ -1,6 +1,6 @@
 use crate::math::{span_runs, split_inline};
 use crate::pdf::{Block, BlockKind, Document};
-use crate::reader::{ImageKey, Raster, Reader, is_translatable};
+use crate::reader::{ImageKey, Raster, Reader, TranslateScope, is_translatable};
 use math::{NativeMath, NativeText};
 use std::collections::HashSet;
 use std::mem::{size_of, zeroed};
@@ -77,7 +77,7 @@ enum Action {
     Next,
     Bilingual,
     Pdf,
-    TranslateAll,
+    TranslateMenu,
     Stop,
     Details,
     Update,
@@ -477,7 +477,15 @@ impl View {
         let model_right = account.left - self.s(12);
         let model_rect = rc(model_right - model_width, self.s(14), model_right, self.s(45));
         let model_label = self.reader.model.as_deref()
-            .map(|id| format!("{}  ▾", self.reader.model_name(id).unwrap_or(id)))
+            .map(|id| {
+                let name = self.reader.model_name(id).unwrap_or(id);
+                let duplicate = self.reader.models.iter().filter(|model| model.display_name == name).count() > 1;
+                if duplicate {
+                    format!("{name} · {id}  ▾")
+                } else {
+                    format!("{name}  ▾")
+                }
+            })
             .unwrap_or_else(|| "翻译模型  ▾".into());
         self.button(p, model_rect, &model_label, Some(Action::Models), false);
         let mut title_right = model_rect.left - self.s(12);
@@ -523,9 +531,20 @@ impl View {
             let stopping = job.stopping();
             let label = if stopping { "正在停止" } else { "停止翻译" };
             self.button(p, rc(right - self.s(92), top, right, bottom), label, (!stopping).then_some(Action::Stop), false);
-        } else if self.reader.can_translate() && self.reader.has_pending_translation() {
-            let label = if self.reader.translation_error.is_some() { "重试翻译" } else { "继续翻译" };
-            self.button(p, rc(right - self.s(92), top, right, bottom), label, Some(Action::TranslateAll), false);
+        } else if self.reader.can_translate() {
+            let page_pending = self.reader.pending_count(TranslateScope::Page(self.reader.page));
+            let any_pending = self.reader.has_pending_translation()
+                || self.reader.pending_count(TranslateScope::References) > 0;
+            if any_pending || self.reader.translation_error.is_some() {
+                let label = if self.reader.translation_error.is_some() {
+                    "重试翻译  ▾"
+                } else if page_pending > 0 {
+                    "翻译本页  ▾"
+                } else {
+                    "翻译  ▾"
+                };
+                self.button(p, rc(right - self.s(92), top, right, bottom), label, Some(Action::TranslateMenu), false);
+            }
         }
     }
 

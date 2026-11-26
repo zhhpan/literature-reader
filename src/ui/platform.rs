@@ -329,7 +329,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, 
                 }
                 let action = match key {
                     VK_O if ctrl => Some(Action::Open),
-                    VK_T if ctrl => Some(Action::TranslateAll),
+                    VK_T if ctrl => Some(Action::TranslateMenu),
                     VK_LEFT if pdf_view => Some(Action::Previous),
                     VK_RIGHT if pdf_view => Some(Action::Next),
                     VK_HOME if ctrl && pdf_view => Some(Action::GoTo(1)),
@@ -506,8 +506,10 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                             } else {
                                 model.display_name.clone()
                             };
-                            if let Some(multiplier) = model.credit_multiplier {
-                                label.push_str(&format!("\t{multiplier}×"));
+                            match model.credit_multiplier {
+                                Some(multiplier) if multiplier == 0.0 => label.push_str("\t免费"),
+                                Some(multiplier) => label.push_str(&format!("\t{multiplier}×")),
+                                None => {}
                             }
                             items.push((id, label, view.reader.model.as_ref() == Some(&model.id)));
                             ids.push(model.id.clone());
@@ -530,6 +532,40 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                             (*ptr).reader.select_model(id);
                         }
                     }
+                    _ => {}
+                }
+            }
+            Action::TranslateMenu => {
+                let (anchor, items) = {
+                    let view = &*ptr;
+                    let page = view.reader.page;
+                    let page_count = view.reader.pending_count(TranslateScope::Page(page));
+                    let all_count = view.reader.pending_count(TranslateScope::All);
+                    let reference_count = view.reader.pending_count(TranslateScope::References);
+                    let mut items = Vec::new();
+                    if page_count > 0 {
+                        items.push((1, format!("翻译本页（第 {page} 页，{page_count} 段）"), false));
+                    }
+                    if all_count > 0 {
+                        items.push((2, format!("翻译全文（{all_count} 段）"), false));
+                    }
+                    if reference_count > 0 {
+                        items.push((3, format!("翻译参考文献（{reference_count} 条）"), false));
+                    }
+                    (menu_anchor(view, action), items)
+                };
+                if items.is_empty() {
+                    return;
+                }
+                let selection = dropdown(hwnd, anchor, &items);
+                if GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut View != ptr {
+                    return;
+                }
+                let view = &mut *ptr;
+                match selection {
+                    1 => view.reader.start_translation(TranslateScope::Page(view.reader.page)),
+                    2 => view.reader.start_translation(TranslateScope::All),
+                    3 => view.reader.start_translation(TranslateScope::References),
                     _ => {}
                 }
             }
@@ -596,7 +632,6 @@ fn activate(hwnd: HWND, ptr: *mut View, action: Action) {
                     Action::Previous => view.goto(view.reader.page.saturating_sub(1)),
                     Action::Next => view.goto(view.reader.page + 1),
                     Action::Bilingual | Action::Pdf => view.switch_pdf_view(action == Action::Pdf),
-                    Action::TranslateAll => view.reader.start_translation(),
                     Action::Stop => view.reader.cancel_translation(),
                     _ => unreachable!(),
                 }
