@@ -105,10 +105,17 @@ async function authenticate(sdk, interactive) {
       }
     },
   });
-  return Promise.race([auth.then(({ userinfo }) => {
+  return Promise.race([auth.then(async ({ userinfo }) => {
     const displayName = [userinfo?.userNickname, userinfo?.userName]
       .find((value) => typeof value === 'string' && value.trim());
-    return displayName ? { display_name: displayName.trim() } : {};
+    const account = displayName ? { display_name: displayName.trim() } : {};
+    if (interactive) {
+      // The SDK's user info already names the avatar; fetch it once here so the
+      // login result can paint it without waiting for the next account refresh.
+      const avatar_image = await avatarForAccount(userinfo).catch(() => undefined);
+      if (avatar_image) account.avatar_image = avatar_image;
+    }
+    return account;
   }), loginUrl]);
 }
 
@@ -188,13 +195,19 @@ function accountText(value) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 120) || undefined : undefined;
 }
 
+function avatarHostAllowed(hostname) {
+  if (hostname === 'copilot.tencent.com') return true;
+  if (AVATAR_DOMAINS.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`))) return true;
+  // CodeBuddy stores uploaded avatars in a signed Tencent COS bucket
+  // (workbuddy-bga-…cos.ap-beijing.myqcloud.com); only COS hosts are allowed.
+  return /^[a-z0-9][a-z0-9.-]*\.cos\.[a-z0-9-]+\.myqcloud\.com$/.test(hostname);
+}
+
 function providerAvatarUrl(value) {
   if (typeof value !== 'string' || value.length > 2048) return undefined;
   try {
     const url = new URL(value);
-    const allowedHost = url.hostname === 'copilot.tencent.com'
-      || AVATAR_DOMAINS.some((domain) => url.hostname === domain || url.hostname.endsWith(`.${domain}`));
-    if (!allowedHost || url.username || url.password || url.port) return undefined;
+    if (!avatarHostAllowed(url.hostname) || url.username || url.password || url.port) return undefined;
     if (url.protocol === 'http:') url.protocol = 'https:';
     if (url.protocol === 'https:') return url;
   } catch {

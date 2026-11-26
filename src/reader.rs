@@ -661,9 +661,18 @@ impl Reader {
                         Err(error) => { self.failed_images.insert(key, error); }
                     }
                 }
-                Event::SessionVerified(account) => {
+                Event::SessionVerified(mut account) => {
+                    // The interactive login carries the SDK avatar with it;
+                    // decode before resetting so the first frame has a picture.
+                    let avatar = account.as_mut()
+                        .and_then(|account| account.avatar_image.take())
+                        .as_deref()
+                        .and_then(Raster::decode_avatar);
                     self.signed_in = true;
                     self.reset_account(account);
+                    if let Some(avatar) = avatar {
+                        self.account_avatar = Some(avatar);
+                    }
                     self.refresh_account();
                 }
                 Event::AccountLoaded(generation, result) if generation == self.account_generation => {
