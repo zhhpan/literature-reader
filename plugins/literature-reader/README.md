@@ -9,7 +9,7 @@
 ## 安装
 
 需要 Tern 0.9 或更新版本。插件自带运行时，**不需要安装桌面版，也不需要设置可执行程序**：
-首次打开时会从 GitHub Releases 下载一次精简后端（Windows x64，约 82 MB），
+首次打开时会从 GitHub Releases 下载一次精简后端（Windows x64，约 86 MB），
 之后完全离线可用。
 
 从 GitHub 安装（推荐；需要 `git`）：

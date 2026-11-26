@@ -144,8 +144,23 @@ local function download(cx, state, entry, done)
 	pcall(tern.fs.mkdir, directory)
 	util.remove(part)
 	setMessage(cx, state, entry.message or "正在下载阅读内核…")
+	local url = string.gsub(entry.url, "'", "''")
+	local target = string.gsub(part, "'", "''")
+	-- PowerShell's .NET TLS stack reaches GitHub release assets where curl's
+	-- schannel handshake can stall on some networks; curl stays for other hosts.
+	local script = table.concat({
+		"$ProgressPreference = 'SilentlyContinue'",
+		"[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12",
+		"try {",
+		"  Invoke-WebRequest -UseBasicParsing -Uri '" .. url .. "' -OutFile '" .. target .. "'",
+		"  exit 0",
+		"} catch {",
+		"  [Console]::Error.WriteLine($_.Exception.Message)",
+		"  exit 1",
+		"}",
+	}, "; ")
 	local argv = settings.windows
-		and { "curl.exe", "-fsSL", "--retry", "3", "--connect-timeout", "20", "-o", part, entry.url }
+		and { "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }
 		or { "curl", "-fsSL", "--retry", "3", "--connect-timeout", "20", "-o", part, entry.url }
 	run(cx, argv, 900000, function(result)
 		if result.status ~= 0 then
